@@ -175,7 +175,8 @@ def find_customer_by_phone(phone: str):
                 "row": rownum,
                 "name": cell(ncol),
                 "proposed_appointment": cell(acol),
-                "opted_in": cell(_find_col(cols, "opt-in status")).lower() == "opted in",
+                "opted_in": (cell(_find_col(cols, "opt-in status")).lower() == "opted in"
+                             or cell(_find_col(cols, "ok to text?")).upper() == "TRUE"),
                 "fields": fields,
             }
     return None
@@ -264,6 +265,9 @@ def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched
 # ---------------------------------------------------------------- text-to-join
 JOIN_KEYWORDS = {"JOIN", "REMIND"}
 JOIN_METHOD = "Keyword JOIN"  # must be in the Opt-In Method dropdown on the Customers tab
+# Y/YES is a confirm from an opted-in customer, and a text-to-join from anyone else
+# (the printed kit and site say "Text YES"; Y works too). Reuses JOIN_METHOD in the sheet.
+YES_WORDS = {"Y", "YES"}
 # Mirrors the opt-in message registered on the A2P campaign, with the "PestPod:" prefix.
 JOIN_REPLY = (
     "PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs per visit. "
@@ -373,7 +377,8 @@ def sms_webhook(
     Body: str = Form(""),
     MessageSid: str = Form(""),
 ):
-    reply = Body.strip().upper()
+    # Case-insensitive, trimmed, trailing punctuation ignored ("y." / "Yes!" -> Y / YES).
+    reply = re.sub(r"[\s.!]+$", "", Body.strip()).upper()
     phone = normalize_phone(From)
 
     try:
@@ -382,6 +387,7 @@ def sms_webhook(
         log.warning("lookup failed (%s)", type(e).__name__)
         customer = None
     row = customer.get("row") if customer else None
+    opted_in = bool(customer and customer.get("opted_in"))
     log_inbound(phone, Body, MessageSid, datetime.now(TZ), row)
 
     resp = MessagingResponse()
@@ -390,8 +396,9 @@ def sms_webhook(
     if reply in OPT_KEYWORDS:
         return PlainTextResponse(str(resp), media_type="application/xml")
 
-    # Text-to-join: record consent and confirm. Strangers never get added to Customers.
-    if reply in JOIN_KEYWORDS:
+    # Text-to-join: JOIN/REMIND always; Y/YES unless the sender is an opted-in customer
+    # (then it's an appointment confirm). Strangers never get added to Customers.
+    if reply in JOIN_KEYWORDS or (reply in YES_WORDS and not opted_in):
         if row:
             mark_customer_opted_in(row)
         else:
@@ -402,13 +409,14 @@ def sms_webhook(
     if customer:
         name = customer.get("name") or DEFAULT_NAME
         appt = customer.get("proposed_appointment") or DEFAULT_APPT
-        if reply in ("Y", "YES"):
+        if reply in YES_WORDS:  # opted in (otherwise handled above)
             resp.message(confirm_reply(name, appt))
             update_customer_reply(row, "Y")
-        elif reply in ("N", "NO"):
+        elif reply in ("N", "NO") and opted_in:
             resp.message(reschedule_reply(name))
             update_customer_reply(row, "N")
         else:
+            # Includes N from a non-opted-in row: help only, nothing marked.
             resp.message("PestPod: Reply Y to confirm or N to reschedule. Reply HELP for help, STOP to opt out.")
     else:
         resp.message("PestPod: No matching appointment found. Reply HELP for help, STOP to opt out.")

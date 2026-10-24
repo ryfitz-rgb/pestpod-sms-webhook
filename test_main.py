@@ -101,9 +101,15 @@ def test_garbage(svc):
 
 
 def test_unknown_number(svc):
-    t = post("Y", frm="+15555550000")
+    t = post("maybe", frm="+15555550000")
     assert "No matching appointment found" in t
     assert svc.appends[0][4] == "" and not [w for w in svc.writes if w["range"].startswith("'Customers'")]
+
+
+def test_unknown_number_n_not_marked(svc):
+    t = post("N", frm="+15555550000")
+    assert "No matching appointment found" in t
+    assert len(svc.appends) == 1 and not [w for w in svc.writes if w["range"].startswith("'Customers'")]
 
 
 def test_existing_tab_not_recreated(svc):
@@ -139,7 +145,8 @@ def test_missing_creds_falls_back(monkeypatch):
     monkeypatch.setattr(main, "TEST_PHONE", PHONE)
     assert "Thanks Ryan, your pest control service is confirmed for Tue 10/27 at 9 AM." in post("Y")
     assert "Got it Ryan" in post("n")
-    assert "No matching appointment found" in post("Y", frm="+15555550000")
+    assert main.JOIN_REPLY in post("Y", frm="+15555550000")  # stranger Y = text-to-join
+    assert "No matching appointment found" in post("N", frm="+15555550000")
     assert "<Message>" not in post("HELP")
 
 
@@ -238,3 +245,69 @@ def test_stop_start_help_still_silent(full):
 
 def test_version():
     assert "commit" in client.get("/version").json()
+
+
+# ---------------------------------------------------------------- Y/YES as text-to-join
+OPTED_ROWS = [FULL_HEADER,
+              ["T-1", "Sam", "555.555.0199", "TRUE", "Opted in", "Signed ticket", "2026-10-01",
+               "Tue 10/27 at 9 AM", "Sent", ""]]
+OK_ONLY_ROWS = [FULL_HEADER,
+                ["T-1", "Sam", "555.555.0199", "TRUE", "", "", "", "Tue 10/27 at 9 AM", "Sent", ""]]
+
+
+@pytest.mark.parametrize("word", ["Y", "y", " y ", "y.", "Y!", "YES", "yes", "Yes."])
+def test_y_from_not_opted_in_customer_opts_in(full, word):
+    t = post(word)
+    assert main.JOIN_REPLY in t and t.count("<Message>") == 1 and "confirmed for" not in t
+    today = _dt.now(main.TZ).date().isoformat()
+    assert {"range": "'Customers'!D2", "values": [[True]]} in full.writes
+    assert {"range": "'Customers'!E2", "values": [["Opted in"]]} in full.writes
+    assert {"range": "'Customers'!F2", "values": [["Keyword JOIN"]]} in full.writes
+    assert {"range": "'Customers'!G2", "values": [[today]]} in full.writes
+    # Not treated as a confirm: Reminder Status / Last Reply untouched; no Opt-Ins row.
+    assert not [w for w in full.writes if w["range"] in ("'Customers'!I2", "'Customers'!J2")]
+    assert "Opt-Ins" not in full.added
+    assert len(full.appends) == 1 and full.appends[0][2] == word and full.appends[0][4] == 2
+
+
+@pytest.mark.parametrize("word", ["Y", "y.", "YES"])
+def test_y_from_stranger_goes_to_optins(full, word):
+    t = post(word, frm="+15555550000", sid="SMy")
+    assert main.JOIN_REPLY in t
+    assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
+    assert "Opt-Ins" in full.added
+    inbound, optin = full.appends
+    assert inbound[2] == word
+    assert optin[1:] == ["+15555550000", word.rstrip(".").upper(), "SMy", ""]
+
+
+@pytest.mark.parametrize("rows", [OPTED_ROWS, OK_ONLY_ROWS])
+def test_y_from_opted_in_customer_confirms(full, monkeypatch, rows):
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
+    t = post("y.")
+    assert "Thanks Sam, your pest control service is confirmed for Tue 10/27 at 9 AM." in t
+    assert main.JOIN_REPLY not in t
+    assert {"range": "'Customers'!J2", "values": [["Y"]]} in full.writes
+    assert {"range": "'Customers'!I2", "values": [["Confirmed Y"]]} in full.writes
+    assert not [w for w in full.writes if w["range"] in ("'Customers'!D2", "'Customers'!E2",
+                                                          "'Customers'!F2", "'Customers'!G2")]
+    assert "Opt-Ins" not in full.added
+
+
+def test_n_from_not_opted_in_customer_not_marked(full):
+    t = post("N")
+    assert "Reply Y to confirm or N to reschedule" in t and "reschedule your" not in t
+    assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
+    assert len(full.appends) == 1  # Inbound Log only
+
+
+def test_n_from_opted_in_customer_reschedules(full, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", OPTED_ROWS)
+    assert "Got it Sam, we'll reschedule" in post("n")
+    assert {"range": "'Customers'!I2", "values": [["Reschedule N"]]} in full.writes
+
+
+def test_stop_start_help_silent_for_non_opted_in(full):
+    for w in ("STOP", "START", "HELP", "stop."):
+        assert "<Message>" not in post(w)
+    assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
