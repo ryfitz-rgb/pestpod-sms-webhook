@@ -189,23 +189,35 @@ def update_customer_reply(row, reply: str) -> None:
         return
     try:
         _, cols, _ = read_customers(svc)
-        data = []
-        lr = _find_col(cols, "last reply")
-        if lr is not None:
-            data.append({"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(lr)}{row}", "values": [[reply]]})
-        rs = _find_col(cols, "reminder status")
-        if rs is not None:
-            status = "Confirmed" if reply == "Y" else "Reschedule"
-            data.append({"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(rs)}{row}", "values": [[status]]})
-        if not data:
-            log.warning("No 'Last Reply' column found")
-            return
-        svc.spreadsheets().values().batchUpdate(
-            spreadsheetId=SHEET_ID, body={"valueInputOption": "RAW", "data": data}
-        ).execute()
-        _cache["data"] = None  # force a fresh read next time
     except Exception as e:
-        log.warning("update_customer_reply failed (%s)", type(e).__name__)
+        log.warning("update_customer_reply read failed (%s)", type(e).__name__)
+        return
+    lr = _find_col(cols, "last reply")
+    if lr is None:
+        log.warning("No 'Last Reply' column found")
+        return
+    last_reply = {"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(lr)}{row}", "values": [[reply]]}
+    data = [last_reply]
+    rs = _find_col(cols, "reminder status")
+    if rs is not None:
+        # Must match the column's ONE_OF_LIST validation exactly.
+        status = "Confirmed Y" if reply == "Y" else "Reschedule N"
+        data.append({"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(rs)}{row}", "values": [[status]]})
+
+    def write(d):
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=SHEET_ID, body={"valueInputOption": "RAW", "data": d}
+        ).execute()
+
+    try:
+        write(data)
+    except Exception as e:
+        log.warning("combined reply write failed (%s); retrying Last Reply alone", type(e).__name__)
+        try:
+            write([last_reply])
+        except Exception as e2:
+            log.warning("Last Reply write failed (%s)", type(e2).__name__)
+    _cache["data"] = None  # force a fresh read next time
 
 
 _inbound_tab_ready = False

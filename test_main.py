@@ -69,7 +69,7 @@ def test_yes_confirms_and_writes(svc):
     t = post("y")
     assert "Thanks Sam, your pest control service is confirmed for Tue 2026-10-27 9:00 AM." in t
     assert {"range": "'Customers'!G3", "values": [["Y"]]} in svc.writes
-    assert {"range": "'Customers'!F3", "values": [["Confirmed"]]} in svc.writes
+    assert {"range": "'Customers'!F3", "values": [["Confirmed Y"]]} in svc.writes
     assert svc.added == ["Inbound Log"]
     assert {"range": "'Inbound Log'!A1", "values": [main.INBOUND_HEADERS]} in svc.writes
     ts, phone, body, sid, row = svc.appends[0]
@@ -85,7 +85,7 @@ def test_no_reschedules(svc):
     t = post(" N ")
     assert "Got it Sam, we'll reschedule" in t
     assert {"range": "'Customers'!G3", "values": [["N"]]} in svc.writes
-    assert {"range": "'Customers'!F3", "values": [["Reschedule"]]} in svc.writes
+    assert {"range": "'Customers'!F3", "values": [["Reschedule N"]]} in svc.writes
 
 
 def test_stop_silent_but_logged(svc):
@@ -109,6 +109,22 @@ def test_unknown_number(svc):
 def test_existing_tab_not_recreated(svc):
     svc.tabs.add("Inbound Log"); post("Y")
     assert svc.added == []
+
+
+def test_combined_failure_retries_last_reply(svc, monkeypatch):
+    calls = []
+    orig = svc.batchUpdate
+    def flaky(spreadsheetId, body):
+        calls.append(body)
+        if "data" in body and len(body["data"]) > 1:
+            return Exec(lambda: (_ for _ in ()).throw(RuntimeError("validation")))
+        return orig(spreadsheetId, body)
+    monkeypatch.setattr(svc, "batchUpdate", flaky)
+    assert "confirmed for" in post("Y")
+    data_calls = [c["data"] for c in calls if "data" in c]
+    assert len(data_calls) == 2 and len(data_calls[1]) == 1
+    assert {"range": "'Customers'!G3", "values": [["Y"]]} in svc.writes
+    assert not [w for w in svc.writes if w["range"] == "'Customers'!F3"]
 
 
 def test_write_failure_still_replies(svc):

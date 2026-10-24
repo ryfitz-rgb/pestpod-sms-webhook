@@ -11,7 +11,7 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
 - `TEST_PHONE` (optional): fallback match when Sheets is unavailable.
 
 ## Sheet writes
-- Customers tab: `Last Reply` = Y/N and `Reminder Status` = Confirmed/Reschedule on the matched row.
+- Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
 - `Inbound Log` tab (auto-created): Timestamp (America/Chicago), Phone, Body, MessageSid, Matched Row.
 
 ## Tests
