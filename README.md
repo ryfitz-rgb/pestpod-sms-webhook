@@ -1,7 +1,8 @@
 # PestPod SMS Webhook
 
-FastAPI app for Twilio inbound SMS (`POST /api/v1/sms/webhook`, `GET /health`).
-Y/YES confirms, N/NO reschedules; STOP/START/HELP are left to Twilio Advanced Opt-Out.
+FastAPI app for Twilio inbound SMS (`POST /api/v1/sms/webhook`, `GET /health`, `GET /version`).
+Y/YES confirms, N/NO reschedules, JOIN/REMIND opts in (text-to-join); STOP/START/HELP are left to
+Twilio Advanced Opt-Out (the webhook stays silent on them). `/version` returns Render's `RENDER_GIT_COMMIT`.
 Replies persist to the "PestPod Reminders v1" Google Sheet.
 
 ## Env vars
@@ -13,6 +14,11 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
 ## Sheet writes
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
 - `Inbound Log` tab (auto-created): Timestamp (America/Chicago), Phone, Body, MessageSid, Matched Row.
+- JOIN/REMIND (any case, trimmed) from a phone on the Customers tab: `OK to Text?` = TRUE,
+  `Opt-In Status` = `Opted in`, `Opt-In Method` = `Keyword JOIN` (must be in that column's dropdown),
+  `Opt-In Date` = today (Chicago). From an unknown phone: a row in the `Opt-Ins` tab (auto-created:
+  Timestamp, Phone, Keyword, MessageSid, Matched Row); strangers are never added to Customers.
+  Either way the reply is the opt-in confirmation (`JOIN_REPLY` in `main.py`).
 
 ## Tests
 `pip install -r requirements.txt pytest httpx && pytest -q`

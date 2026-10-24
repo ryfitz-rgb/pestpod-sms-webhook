@@ -1,5 +1,5 @@
 """Offline tests: Sheets is mocked, no network, no real phone numbers."""
-import base64, json, re
+import base64, html, json, re
 import pytest
 from fastapi.testclient import TestClient
 import main
@@ -62,7 +62,7 @@ client = TestClient(main.app)
 def post(body, frm=PHONE, sid="SM123"):
     r = client.post("/api/v1/sms/webhook", data={"From": frm, "Body": body, "MessageSid": sid})
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
-    return r.text
+    return html.unescape(r.text)
 
 
 def test_yes_confirms_and_writes(svc):
@@ -167,3 +167,74 @@ def test_normalize():
 
 def test_health():
     assert client.get("/health").json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------- text-to-join
+import sys
+from datetime import datetime as _dt
+
+FULL_HEADER = ["Account", "Customer Name", "Phone (+1XXXXXXXXXX)", "OK to Text?", "Opt-In Status",
+               "Opt-In Method", "Opt-In Date", "Proposed Appointment", "Reminder Status", "Last Reply"]
+FULL_ROWS = [FULL_HEADER,
+             ["T-1", "Sam", "555.555.0199", "FALSE", "Not asked", "", "", "", "Not sent", ""]]
+
+
+@pytest.fixture
+def full(svc, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", FULL_ROWS)
+    monkeypatch.setattr(main, "_optins_tab_ready", False)
+    return svc
+
+
+@pytest.mark.parametrize("word", ["JOIN", " join ", "Join", "REMIND", "remind"])
+def test_join_known_customer_opts_in(full, word):
+    t = post(word)
+    assert main.JOIN_REPLY in t and t.count("<Message>") == 1
+    today = _dt.now(main.TZ).date().isoformat()
+    assert {"range": "'Customers'!D2", "values": [[True]]} in full.writes
+    assert {"range": "'Customers'!E2", "values": [["Opted in"]]} in full.writes
+    assert {"range": "'Customers'!F2", "values": [["Keyword JOIN"]]} in full.writes
+    assert {"range": "'Customers'!G2", "values": [[today]]} in full.writes
+    # No Last Reply / Reminder Status change, and no Opt-Ins row for a known customer.
+    assert not [w for w in full.writes if w["range"] in ("'Customers'!I2", "'Customers'!J2")]
+    assert "Opt-Ins" not in full.added
+    assert len(full.appends) == 1 and full.appends[0][2] == word  # Inbound Log only
+
+
+def test_join_stranger_logged_not_added(full):
+    t = post("JOIN", frm="+15555550000", sid="SMjoin")
+    assert main.JOIN_REPLY in t
+    assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
+    assert "Opt-Ins" in full.added
+    assert {"range": "'Opt-Ins'!A1", "values": [main.OPTINS_HEADERS]} in full.writes
+    inbound, optin = full.appends
+    ts, phone, kw, sid, row = optin
+    assert (phone, kw, sid, row) == ("+15555550000", "JOIN", "SMjoin", "")
+    assert re.match(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d-0[56]:00$", ts)
+
+
+def test_join_reply_is_compliant():
+    r = main.JOIN_REPLY
+    assert r.startswith("PestPod:") and "STOP" in r and "HELP" in r and "Msg & data rates" in r
+    assert len(r) <= 160
+
+
+def test_join_write_failure_still_replies(full):
+    full.fail_writes = True
+    assert main.JOIN_REPLY in post("JOIN")
+    assert main.JOIN_REPLY in post("JOIN", frm="+15555550000")
+
+
+def test_join_without_sheets(monkeypatch):
+    monkeypatch.setattr(main, "_service", None)
+    monkeypatch.setattr(main, "_service_failed", True)
+    assert main.JOIN_REPLY in post("JOIN", frm="+15555550000")
+
+
+def test_stop_start_help_still_silent(full):
+    for w in ("STOP", "START", "HELP", "unstop"):
+        assert "<Message>" not in post(w)
+
+
+def test_version():
+    assert "commit" in client.get("/version").json()

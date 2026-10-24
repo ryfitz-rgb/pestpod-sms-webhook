@@ -33,6 +33,8 @@ SHEET_ID = os.environ.get("SHEET_ID") or "1k2DgUsGiEk6VaTG1lDD554o9BqvWWJ7pOg7I4
 CUSTOMERS_TAB = "Customers"
 INBOUND_TAB = "Inbound Log"
 INBOUND_HEADERS = ["Timestamp", "Phone", "Body", "MessageSid", "Matched Row"]
+OPTINS_TAB = "Opt-Ins"
+OPTINS_HEADERS = ["Timestamp", "Phone", "Keyword", "MessageSid", "Matched Row"]
 TZ = ZoneInfo("America/Chicago")
 CACHE_TTL = 30  # seconds
 HTTP_TIMEOUT = 5  # seconds per Sheets call; Twilio gives us 15s total
@@ -259,6 +261,91 @@ def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched
         log.warning("log_inbound failed (%s)", type(e).__name__)
 
 
+# ---------------------------------------------------------------- text-to-join
+JOIN_KEYWORDS = {"JOIN", "REMIND"}
+JOIN_METHOD = "Keyword JOIN"  # must be in the Opt-In Method dropdown on the Customers tab
+# Mirrors the opt-in message registered on the A2P campaign, with the "PestPod:" prefix.
+JOIN_REPLY = (
+    "PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs per visit. "
+    "Msg & data rates may apply. Reply HELP for help, STOP to cancel."
+)
+
+
+def mark_customer_opted_in(row, today=None) -> bool:
+    """Set OK to Text?/Opt-In Status/Method/Date on a Customers row. Never raises."""
+    print(f"[OPT-IN] row {row} -> Opted in via {JOIN_METHOD}")
+    if not row:
+        return False
+    svc = get_sheets()
+    if svc is None:
+        return False
+    try:
+        _, cols, _ = read_customers(svc)
+    except Exception as e:
+        log.warning("mark_customer_opted_in read failed (%s)", type(e).__name__)
+        return False
+    day = (today or datetime.now(TZ).date()).isoformat()
+    wanted = [("ok to text?", True), ("opt-in status", "Opted in"),
+              ("opt-in method", JOIN_METHOD), ("opt-in date", day)]
+    data = []
+    for header, value in wanted:
+        j = _find_col(cols, header)
+        if j is not None:
+            data.append({"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(j)}{row}", "values": [[value]]})
+    if not data:
+        return False
+    try:
+        # USER_ENTERED so TRUE stays a checkbox boolean and the date stays a real date.
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=SHEET_ID, body={"valueInputOption": "USER_ENTERED", "data": data}
+        ).execute()
+    except Exception as e:
+        log.warning("opt-in write failed (%s)", type(e).__name__)
+        return False
+    finally:
+        _cache["data"] = None
+    return True
+
+
+_optins_tab_ready = False
+
+
+def _ensure_optins_tab(svc) -> None:
+    global _optins_tab_ready
+    if _optins_tab_ready:
+        return
+    meta = svc.spreadsheets().get(spreadsheetId=SHEET_ID, fields="sheets.properties.title").execute()
+    titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+    if OPTINS_TAB not in titles:
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": OPTINS_TAB}}}]},
+        ).execute()
+        svc.spreadsheets().values().update(
+            spreadsheetId=SHEET_ID, range=f"{quote_tab(OPTINS_TAB)}!A1",
+            valueInputOption="RAW", body={"values": [OPTINS_HEADERS]},
+        ).execute()
+    _optins_tab_ready = True
+
+
+def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, timestamp=None) -> None:
+    """Append a keyword opt-in to the Opt-Ins tab. Never raises."""
+    ts = (timestamp or datetime.now(TZ)).astimezone(TZ).isoformat(timespec="seconds")
+    print(f"[OPT-INS] {ts} | {phone} | {keyword} | SID={message_sid} | row={matched_row}")
+    svc = get_sheets()
+    if svc is None:
+        return
+    try:
+        _ensure_optins_tab(svc)
+        svc.spreadsheets().values().append(
+            spreadsheetId=SHEET_ID, range=f"{quote_tab(OPTINS_TAB)}!A:E",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": [[ts, phone, keyword, message_sid, matched_row or ""]]},
+        ).execute()
+    except Exception as e:
+        log.warning("log_optin failed (%s)", type(e).__name__)
+
+
 # ---------------------------------------------------------------- replies
 # STOP/START/HELP are handled by Twilio Advanced Opt-Out on the Messaging Service.
 OPT_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "UNSTOP", "HELP", "INFO"}
@@ -303,6 +390,15 @@ def sms_webhook(
     if reply in OPT_KEYWORDS:
         return PlainTextResponse(str(resp), media_type="application/xml")
 
+    # Text-to-join: record consent and confirm. Strangers never get added to Customers.
+    if reply in JOIN_KEYWORDS:
+        if row:
+            mark_customer_opted_in(row)
+        else:
+            log_optin(phone, reply, MessageSid)
+        resp.message(JOIN_REPLY)
+        return PlainTextResponse(str(resp), media_type="application/xml")
+
     if customer:
         name = customer.get("name") or DEFAULT_NAME
         appt = customer.get("proposed_appointment") or DEFAULT_APPT
@@ -323,6 +419,12 @@ def sms_webhook(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/version")
+async def version():
+    # Render sets RENDER_GIT_COMMIT on each deploy.
+    return {"commit": os.environ.get("RENDER_GIT_COMMIT", "unknown")}
 
 
 if __name__ == "__main__":
