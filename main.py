@@ -20,8 +20,9 @@ from zoneinfo import ZoneInfo
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, Form
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -31,6 +32,8 @@ log = logging.getLogger("pestpod")
 
 @asynccontextmanager
 async def lifespan(_app):
+    if not _auth_token():
+        log.warning(UNSIGNED_WARNING)
     # Warm the Sheets client + Customers cache without blocking startup, so the first
     # reply after a cold start usually skips the Sheets round-trip.
     threading.Thread(target=warm_cache, name="warm-customers", daemon=True).start()
@@ -453,6 +456,45 @@ def reschedule_reply(name: str) -> str:
     )
 
 
+# ---------------------------------------------------------------- Twilio signature check
+UNSIGNED_WARNING = ("SECURITY: TWILIO_AUTH_TOKEN is not set; Twilio signature validation is OFF "
+                    "and the SMS webhook accepts unsigned requests. Set it on Render.")
+
+
+def _auth_token() -> str:
+    # Read per request so a Render env change (which restarts the service) or a test patch applies.
+    return os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+
+
+def signed_url(request: Request) -> str:
+    """The URL Twilio signed. Render terminates TLS at its proxy, so request.url says http://."""
+    override = os.environ.get("WEBHOOK_PUBLIC_URL", "").strip()
+    if override:
+        return override
+    proto = (request.headers.get("x-forwarded-proto") or "https").split(",")[0].strip() or "https"
+    host = request.headers.get("host") or request.url.netloc
+    host = host.split(",")[0].strip()
+    url = f"{proto}://{host}{request.url.path}"
+    if request.url.query:
+        url += "?" + request.url.query
+    return url
+
+
+async def verify_twilio_signature(request: Request) -> None:
+    """Runs before the webhook body: a bad/missing X-Twilio-Signature -> 403, nothing else happens."""
+    token = _auth_token()
+    if not token:
+        log.warning(UNSIGNED_WARNING)
+        return
+    signature = request.headers.get("x-twilio-signature", "")
+    form = await request.form()  # Starlette caches this; the Form() params reuse it
+    url = signed_url(request)
+    if not signature or not RequestValidator(token).validate(url, form, signature):
+        log.warning("rejected SMS webhook request: %s Twilio signature (url=%s)",
+                    "bad" if signature else "missing", url)
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 def _background(fn, *args, **kwargs) -> None:
     """Run a post-response Sheets write; log failures, never raise."""
     try:
@@ -461,7 +503,7 @@ def _background(fn, *args, **kwargs) -> None:
         log.warning("background %s failed (%s)", getattr(fn, "__name__", "task"), type(e).__name__)
 
 
-@app.post("/api/v1/sms/webhook")
+@app.post("/api/v1/sms/webhook", dependencies=[Depends(verify_twilio_signature)])
 def sms_webhook(
     background_tasks: BackgroundTasks,
     From: str = Form(""),
@@ -530,7 +572,8 @@ async def health():
 @app.get("/version")
 async def version():
     # Render sets RENDER_GIT_COMMIT on each deploy.
-    return {"commit": os.environ.get("RENDER_GIT_COMMIT", "unknown")}
+    return {"commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
+            "signature_validation": bool(_auth_token())}
 
 
 if __name__ == "__main__":

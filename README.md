@@ -4,7 +4,8 @@ FastAPI app for Twilio inbound SMS (`POST /api/v1/sms/webhook`, `GET /health`, `
 Y/YES from an opted-in customer confirms; Y/YES from anyone else, and JOIN/REMIND from anyone, opts in
 (text-to-join). N/NO from an opted-in customer reschedules (otherwise help only, nothing marked).
 Replies are case-insensitive, trimmed, trailing "." / "!" ignored. STOP/START/HELP are left to
-Twilio Advanced Opt-Out (the webhook stays silent on them). `/version` returns Render's `RENDER_GIT_COMMIT`.
+Twilio Advanced Opt-Out (the webhook stays silent on them). `/version` returns Render's `RENDER_GIT_COMMIT`
+and `signature_validation` (true/false).
 Replies persist to the "PestPod Reminders v1" Google Sheet.
 
 ## Env vars
@@ -12,6 +13,20 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
   service account email as Editor. If unset or invalid, Sheets is disabled and only `TEST_PHONE` matches.
 - `SHEET_ID` (optional): defaults to the PestPod Reminders v1 sheet.
 - `TEST_PHONE` (optional): fallback match when Sheets is unavailable.
+- `TWILIO_AUTH_TOKEN`, `WEBHOOK_PUBLIC_URL` (optional): see Security.
+
+## Security (Twilio signature validation)
+`POST /api/v1/sms/webhook` checks the `X-Twilio-Signature` header (HMAC-SHA1 of the URL + form params,
+via `twilio.request_validator.RequestValidator`) before doing anything else. A missing or wrong
+signature gets HTTP 403: no lookup, no sheet writes, no log rows, no TwiML; a warning is logged.
+- `TWILIO_AUTH_TOKEN`: the Twilio account's **primary Auth Token** (Console -> Account -> API keys &
+  tokens). API key secrets can't validate signatures. If unset, validation is OFF: requests are still
+  accepted and a loud warning is logged at startup and on every request (rollout safety).
+- `WEBHOOK_PUBLIC_URL` (optional): the exact URL configured in Twilio, e.g.
+  `https://pestpod-sms-webhook.onrender.com/api/v1/sms/webhook`. Without it the signed URL is rebuilt
+  as `<X-Forwarded-Proto, default https>://<Host><path>?<query>` (Render terminates TLS at its proxy).
+- `GET /version` shows `"signature_validation": true` when enforced (the token itself is never exposed).
+  `/health` and `/version` need no signature.
 
 ## Sheet writes
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.

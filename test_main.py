@@ -59,6 +59,13 @@ def svc(monkeypatch):
 client = TestClient(main.app)
 
 
+@pytest.fixture(autouse=True)
+def _no_twilio_token(monkeypatch):
+    # Signature validation is off unless a test turns it on (keeps a real env token out of tests).
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("WEBHOOK_PUBLIC_URL", raising=False)
+
+
 def post(body, frm=PHONE, sid="SM123"):
     r = client.post("/api/v1/sms/webhook", data={"From": frm, "Body": body, "MessageSid": sid})
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
@@ -453,3 +460,117 @@ def test_lifespan_warms_cache(svc):
             if main._cache["data"] is not None: break
             time.sleep(0.01)
     assert main._cache["data"] is not None
+
+
+# ---------------------------------------------------------------- Twilio signature validation
+from twilio.request_validator import RequestValidator
+
+TOKEN = "test-auth-token-not-real"
+WEBHOOK_PATH = "/api/v1/sms/webhook"
+TEST_URL = "https://testserver" + WEBHOOK_PATH  # TestClient Host header; proto defaults to https
+
+
+def signed_post(body, url=TEST_URL, token=TOKEN, sig=None, headers=None, path=WEBHOOK_PATH):
+    data = {"From": PHONE, "Body": body, "MessageSid": "SM123"}
+    h = dict(headers or {})
+    if sig is None:
+        sig = RequestValidator(token).compute_signature(url, data)
+    if sig is not False:
+        h["X-Twilio-Signature"] = sig
+    return client.post(path, data=data, headers=h)
+
+
+@pytest.fixture
+def enforced(svc, monkeypatch):
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
+    return svc
+
+
+def test_valid_signature_accepted(enforced):
+    r = signed_post("y")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
+    assert "Thanks Sam, your pest control service is confirmed" in html.unescape(r.text)
+    assert {"range": "'Customers'!F3", "values": [["Confirmed Y"]]} in enforced.writes
+    assert enforced.appends and enforced.appends[0][2] == "y"
+
+
+def test_bad_signature_rejected_no_side_effects(enforced, monkeypatch, caplog):
+    looked_up = []
+    monkeypatch.setattr(main, "find_customer_by_phone", lambda p: looked_up.append(p))
+    r = signed_post("y", token="wrong-token")
+    assert r.status_code == 403
+    assert "<Response" not in r.text and "PestPod" not in r.text
+    assert looked_up == [] and enforced.writes == [] and enforced.appends == [] and enforced.added == []
+    assert "rejected SMS webhook request: bad Twilio signature" in caplog.text
+
+
+def test_tampered_body_rejected(enforced):
+    data = {"From": PHONE, "Body": "y", "MessageSid": "SM123"}
+    sig = RequestValidator(TOKEN).compute_signature(TEST_URL, data)
+    r = client.post(WEBHOOK_PATH, data={**data, "Body": "n"}, headers={"X-Twilio-Signature": sig})
+    assert r.status_code == 403 and enforced.writes == [] and enforced.appends == []
+
+
+def test_missing_signature_rejected(enforced, caplog):
+    r = signed_post("y", sig=False)
+    assert r.status_code == 403
+    assert enforced.writes == [] and enforced.appends == [] and enforced.added == []
+    assert "missing Twilio signature" in caplog.text
+
+
+def test_signature_for_http_url_rejected(enforced):
+    # Render's proxy hands us http://; Twilio signs the public https:// URL.
+    assert signed_post("y", url="http://testserver" + WEBHOOK_PATH).status_code == 403
+
+
+def test_forwarded_proto_used(enforced):
+    r = signed_post("y", url="http://testserver" + WEBHOOK_PATH, headers={"X-Forwarded-Proto": "http"})
+    assert r.status_code == 200
+
+
+def test_query_string_is_signed(enforced):
+    path = WEBHOOK_PATH + "?src=twilio"
+    assert signed_post("y", url="https://testserver" + path, path=path).status_code == 200
+    assert signed_post("y", url=TEST_URL, path=path).status_code == 403
+
+
+def test_public_url_override(enforced, monkeypatch):
+    public = "https://pestpod-sms-webhook.onrender.com" + WEBHOOK_PATH
+    monkeypatch.setenv("WEBHOOK_PUBLIC_URL", public)
+    assert signed_post("y", url=public).status_code == 200
+    # With the override set, a signature over the computed (Host-based) URL no longer passes.
+    assert signed_post("y", url=TEST_URL).status_code == 403
+
+
+def test_token_unset_passthrough_warns(svc, caplog):
+    r = signed_post("y", sig=False)
+    assert r.status_code == 200 and "confirmed for" in html.unescape(r.text)
+    assert "signature validation is OFF" in caplog.text
+    r = signed_post("y", sig="garbage")
+    assert r.status_code == 200
+
+
+def test_startup_warns_when_token_unset(svc, caplog):
+    with TestClient(main.app):
+        pass
+    assert "signature validation is OFF" in caplog.text
+
+
+def test_startup_quiet_when_token_set(svc, monkeypatch, caplog):
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
+    with TestClient(main.app):
+        pass
+    assert "signature validation is OFF" not in caplog.text
+
+
+def test_version_reports_validation_without_token(monkeypatch):
+    assert client.get("/version").json()["signature_validation"] is False
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
+    j = client.get("/version").json()
+    assert j["signature_validation"] is True and TOKEN not in json.dumps(j)
+
+
+def test_health_and_version_need_no_signature(monkeypatch):
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
+    assert client.get("/health").status_code == 200
+    assert client.get("/version").status_code == 200
