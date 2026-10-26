@@ -26,6 +26,14 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
   subscribed" reply; the webhook records the opt-in and returns empty TwiML (no double welcome).
   Y is not a Twilio keyword, so Y still gets `JOIN_REPLY`.
 
+## Speed (Twilio's 15 s limit)
+The reply is decided from the Customers tab only, then returned right away. Inbound Log appends,
+Customers writes (Last Reply / Reminder Status / opt-in) and Opt-Ins appends run as FastAPI background
+tasks after the response is sent; failures are logged, never raised. Customers is cached in memory:
+used as-is for 60 s, then (up to 15 min old) served immediately while a background thread re-reads it;
+older or empty means one synchronous read. The cache is warmed on startup and re-read after each
+webhook write.
+
 ## Tests
 `pip install -r requirements.txt pytest httpx && pytest -q`
 

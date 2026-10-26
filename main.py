@@ -18,14 +18,26 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Form
+from contextlib import asynccontextmanager
+
+from fastapi import BackgroundTasks, FastAPI, Form
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("pestpod")
 
-app = FastAPI(title="PestPod SMS Webhook")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    # Warm the Sheets client + Customers cache without blocking startup, so the first
+    # reply after a cold start usually skips the Sheets round-trip.
+    threading.Thread(target=warm_cache, name="warm-customers", daemon=True).start()
+    yield
+
+
+app = FastAPI(title="PestPod SMS Webhook", lifespan=lifespan)
 
 # Fallback test match; number comes from the TEST_PHONE env var (kept out of the repo).
 TEST_PHONE = os.environ.get("TEST_PHONE", "")
@@ -36,7 +48,8 @@ INBOUND_HEADERS = ["Timestamp", "Phone", "Body", "MessageSid", "Matched Row"]
 OPTINS_TAB = "Opt-Ins"
 OPTINS_HEADERS = ["Timestamp", "Phone", "Keyword", "MessageSid", "Matched Row"]
 TZ = ZoneInfo("America/Chicago")
-CACHE_TTL = 30  # seconds
+CACHE_TTL = 60  # seconds: Customers data younger than this is used as-is
+CACHE_MAX_STALE = 15 * 60  # seconds: older (but not this old) is used, then refreshed in background
 HTTP_TIMEOUT = 5  # seconds per Sheets call; Twilio gives us 15s total
 
 PHONE_HEADERS = ("phone", "phone (+1xxxxxxxxxx)")
@@ -112,13 +125,12 @@ def quote_tab(name: str) -> str:
 
 
 _cache = {"at": 0.0, "data": None}
+_fetch_lock = threading.Lock()  # one Customers read at a time; waiters reuse its result
+_refreshing = threading.Event()  # a background refresh is in flight
 
 
-def read_customers(svc):
-    """Return (header_row_number, {header_lower: col_idx}, rows_with_rownum). Cached ~30s."""
-    now = time.time()
-    if _cache["data"] is not None and now - _cache["at"] < CACHE_TTL:
-        return _cache["data"]
+def _fetch_customers(svc):
+    """Read the Customers tab from Sheets and store it in the cache. Raises on failure."""
     res = svc.spreadsheets().values().get(
         spreadsheetId=SHEET_ID, range=quote_tab(CUSTOMERS_TAB)
     ).execute()
@@ -134,8 +146,74 @@ def read_customers(svc):
         raise ValueError("Customers header row not found")
     rows = [(header_idx + 2 + k, r) for k, r in enumerate(values[header_idx + 1:])]
     data = (header_idx + 1, cols, rows)
-    _cache.update(at=now, data=data)
+    _cache.update(at=time.time(), data=data)
     return data
+
+
+def _fresh_cached():
+    data = _cache["data"]
+    if data is not None and time.time() - _cache["at"] < CACHE_TTL:
+        return data
+    return None
+
+
+def _refresh_in_background(svc) -> None:
+    """Start one background Customers re-read (no-op if one is already running)."""
+    if _refreshing.is_set():
+        return
+    _refreshing.set()
+
+    def run():
+        try:
+            with _fetch_lock:
+                _fetch_customers(svc)
+        except Exception as e:
+            log.warning("background Customers refresh failed (%s)", type(e).__name__)
+        finally:
+            _refreshing.clear()
+
+    threading.Thread(target=run, name="refresh-customers", daemon=True).start()
+
+
+def read_customers(svc, allow_stale=False):
+    """Return (header_row_number, {header_lower: col_idx}, rows_with_rownum).
+
+    Cached for CACHE_TTL seconds. With allow_stale=True (the reply path), data up to
+    CACHE_MAX_STALE old is returned immediately and refreshed in a background thread, so
+    a reply never waits on Sheets unless the cache is empty or very old.
+    """
+    data = _fresh_cached()
+    if data is not None:
+        return data
+    data, age = _cache["data"], time.time() - _cache["at"]
+    if allow_stale and data is not None and age < CACHE_MAX_STALE:
+        _refresh_in_background(svc)
+        return data
+    with _fetch_lock:
+        data = _fresh_cached()  # another thread may have just refreshed it
+        if data is not None:
+            return data
+        return _fetch_customers(svc)
+
+
+def _after_write(svc) -> None:
+    """After a Customers write (in background), re-read so the next reply sees it. Never raises."""
+    _cache["data"] = None
+    try:
+        with _fetch_lock:
+            _fetch_customers(svc)
+    except Exception as e:
+        log.warning("Customers re-read after write failed (%s)", type(e).__name__)
+
+
+def warm_cache() -> None:
+    """Build the Sheets client and load Customers. Never raises."""
+    try:
+        svc = get_sheets()
+        if svc is not None:
+            read_customers(svc)
+    except Exception as e:
+        log.warning("cache warm-up failed (%s)", type(e).__name__)
 
 
 def _find_col(cols: dict, *names):
@@ -158,7 +236,7 @@ def find_customer_by_phone(phone: str):
     if svc is None:
         return _test_customer(phone)
     try:
-        _, cols, rows = read_customers(svc)
+        _, cols, rows = read_customers(svc, allow_stale=True)
     except Exception as e:
         log.warning("Customers read failed (%s); using TEST_PHONE fallback", type(e).__name__)
         return _test_customer(phone)
@@ -220,7 +298,7 @@ def update_customer_reply(row, reply: str) -> None:
             write([last_reply])
         except Exception as e2:
             log.warning("Last Reply write failed (%s)", type(e2).__name__)
-    _cache["data"] = None  # force a fresh read next time
+    _after_write(svc)  # refresh so the next reply sees it
 
 
 _inbound_tab_ready = False
@@ -311,7 +389,7 @@ def mark_customer_opted_in(row, today=None) -> bool:
         log.warning("opt-in write failed (%s)", type(e).__name__)
         return False
     finally:
-        _cache["data"] = None
+        _after_write(svc)
     return True
 
 
@@ -375,12 +453,27 @@ def reschedule_reply(name: str) -> str:
     )
 
 
+def _background(fn, *args, **kwargs) -> None:
+    """Run a post-response Sheets write; log failures, never raise."""
+    try:
+        fn(*args, **kwargs)
+    except Exception as e:
+        log.warning("background %s failed (%s)", getattr(fn, "__name__", "task"), type(e).__name__)
+
+
 @app.post("/api/v1/sms/webhook")
 def sms_webhook(
+    background_tasks: BackgroundTasks,
     From: str = Form(""),
     Body: str = Form(""),
     MessageSid: str = Form(""),
 ):
+    # Speed matters: Twilio drops our TwiML reply after 15s. The only Sheets work done before
+    # replying is the (cached) Customers lookup; every log/write below runs as a background
+    # task after the response has been sent, in the order added.
+    def later(fn, *args, **kwargs):
+        background_tasks.add_task(_background, fn, *args, **kwargs)
+
     # Case-insensitive, trimmed, trailing punctuation ignored ("y." / "Yes!" -> Y / YES).
     reply = re.sub(r"[\s.!]+$", "", Body.strip()).upper()
     phone = normalize_phone(From)
@@ -392,7 +485,7 @@ def sms_webhook(
         customer = None
     row = customer.get("row") if customer else None
     opted_in = bool(customer and customer.get("opted_in"))
-    log_inbound(phone, Body, MessageSid, datetime.now(TZ), row)
+    later(log_inbound, phone, Body, MessageSid, datetime.now(TZ), row)
 
     resp = MessagingResponse()
 
@@ -404,9 +497,9 @@ def sms_webhook(
     # (then it's an appointment confirm). Strangers never get added to Customers.
     if reply in JOIN_KEYWORDS or (reply in YES_WORDS and not opted_in):
         if row:
-            mark_customer_opted_in(row)
+            later(mark_customer_opted_in, row, datetime.now(TZ).date())
         else:
-            log_optin(phone, reply, MessageSid)
+            later(log_optin, phone, reply, MessageSid, None, datetime.now(TZ))
         if reply not in TWILIO_OPTIN_WORDS:
             resp.message(JOIN_REPLY)
         return PlainTextResponse(str(resp), media_type="application/xml")
@@ -416,10 +509,10 @@ def sms_webhook(
         appt = customer.get("proposed_appointment") or DEFAULT_APPT
         if reply in YES_WORDS:  # opted in (otherwise handled above)
             resp.message(confirm_reply(name, appt))
-            update_customer_reply(row, "Y")
+            later(update_customer_reply, row, "Y")
         elif reply in ("N", "NO") and opted_in:
             resp.message(reschedule_reply(name))
-            update_customer_reply(row, "N")
+            later(update_customer_reply, row, "N")
         else:
             # Includes N from a non-opted-in row: help only, nothing marked.
             resp.message("PestPod: Reply Y to confirm or N to reschedule. Reply HELP for help, STOP to opt out.")

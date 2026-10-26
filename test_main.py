@@ -339,3 +339,117 @@ def test_start_unstop_send_nothing(full, word, frm):
     assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
     assert "Opt-Ins" not in full.added
     assert len(full.appends) == 1 and full.appends[0][2] == word  # Inbound Log only
+
+
+# ---------------------------------------------------------------- fast reply / background writes
+import asyncio, logging, threading, time
+from fastapi import BackgroundTasks
+
+
+def call_direct(body, frm=PHONE, sid="SMbg"):
+    """Call the endpoint without TestClient so we can see state before background tasks run."""
+    bt = BackgroundTasks()
+    r = main.sms_webhook(background_tasks=bt, From=frm, Body=body, MessageSid=sid)
+    return html.unescape(r.body.decode()), bt
+
+
+@pytest.mark.parametrize("body,expect,row_writes", [
+    ("Y", "Thanks Sam, your pest control service is confirmed for Tue 2026-10-27 9:00 AM.",
+     [{"range": "'Customers'!G3", "values": [["Y"]]}, {"range": "'Customers'!F3", "values": [["Confirmed Y"]]}]),
+    ("N", "Got it Sam, we'll reschedule",
+     [{"range": "'Customers'!G3", "values": [["N"]]}, {"range": "'Customers'!F3", "values": [["Reschedule N"]]}]),
+])
+def test_reply_returned_before_writes_then_writes_run(svc, body, expect, row_writes):
+    t, bt = call_direct(body)
+    assert expect in t
+    assert svc.writes == [] and svc.appends == []  # nothing written before the reply
+    asyncio.run(bt())
+    for w in row_writes:
+        assert w in svc.writes
+    assert svc.appends[0][1:] == [PHONE, body, "SMbg", 3]
+
+
+def test_join_reply_returned_before_optin_writes(full):
+    t, bt = call_direct("Y", frm="+15555550000", sid="SMj")
+    assert main.JOIN_REPLY in t and full.appends == [] and full.added == []
+    asyncio.run(bt())
+    inbound, optin = full.appends
+    assert inbound[2] == "Y" and optin[1:] == ["+15555550000", "Y", "SMj", ""]
+    t, bt = call_direct("JOIN")
+    assert main.JOIN_REPLY in t and not [w for w in full.writes if w["range"].startswith("'Customers'")]
+    asyncio.run(bt())
+    assert {"range": "'Customers'!E2", "values": [["Opted in"]]} in full.writes
+
+
+def test_only_one_sheets_read_before_reply(svc, monkeypatch):
+    reads = []
+    orig = svc.get
+    monkeypatch.setattr(svc, "get", lambda *a, **k: (reads.append(k or a), orig(*a, **k))[1])
+    _, bt = call_direct("Y")
+    assert len(reads) == 1  # just the Customers read
+    reads.clear()
+    _, bt2 = call_direct("maybe")
+    assert reads == []  # second reply served from cache
+
+
+def test_background_failure_logged_not_raised(svc, monkeypatch, caplog):
+    def boom(*a, **k): raise RuntimeError("sheet down")
+    monkeypatch.setattr(main, "update_customer_reply", boom)
+    monkeypatch.setattr(main, "log_inbound", boom)
+    caplog.set_level(logging.WARNING, logger="pestpod")
+    assert "confirmed for" in post("Y")
+    assert "background boom failed (RuntimeError)" in caplog.text
+
+
+def test_stale_cache_served_and_refreshed_in_background(svc, monkeypatch):
+    main.read_customers(svc)
+    main._cache["at"] = time.time() - main.CACHE_TTL - 5  # stale but usable
+    gate, done = threading.Event(), threading.Event()
+    orig = svc.get
+    def slow_get(*a, **k):
+        gate.wait(5); r = orig(*a, **k); done.set(); return r
+    monkeypatch.setattr(svc, "get", slow_get)
+    t, _ = call_direct("Y")  # must not block on the slow read
+    assert "confirmed for" in t
+    gate.set(); assert done.wait(5)
+    for _ in range(50):
+        if not main._refreshing.is_set(): break
+        time.sleep(0.01)
+    assert time.time() - main._cache["at"] < main.CACHE_TTL
+
+
+def test_very_old_cache_reads_synchronously(svc, monkeypatch):
+    main.read_customers(svc)
+    main._cache["at"] = time.time() - main.CACHE_MAX_STALE - 5
+    reads = []
+    orig = svc.get
+    monkeypatch.setattr(svc, "get", lambda *a, **k: (reads.append(1), orig(*a, **k))[1])
+    assert "confirmed for" in call_direct("Y")[0]
+    assert reads == [1]
+
+
+def test_write_refreshes_cache_for_next_reply(full, monkeypatch):
+    # Not opted in -> Y opts in (background); the cache is refreshed so the next Y confirms.
+    rows = [FULL_HEADER, list(FULL_ROWS[1])]
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
+    orig_bu = full.batchUpdate
+    def bu(spreadsheetId, body):
+        e = orig_bu(spreadsheetId, body)
+        def run():
+            r = e.execute()
+            for d in body.get("data", []):
+                if d["range"] == "'Customers'!E2": rows[1][4] = "Opted in"
+            return r
+        return Exec(run)
+    monkeypatch.setattr(full, "batchUpdate", bu)
+    assert main.JOIN_REPLY in post("Y")
+    assert "Thanks Sam" in post("Y")
+
+
+def test_lifespan_warms_cache(svc):
+    main._cache.update(at=0.0, data=None)
+    with TestClient(main.app):
+        for _ in range(100):
+            if main._cache["data"] is not None: break
+            time.sleep(0.01)
+    assert main._cache["data"] is not None
