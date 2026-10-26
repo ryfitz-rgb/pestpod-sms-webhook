@@ -21,7 +21,10 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
   `Opt-In Status` = `Opted in`, `Opt-In Method` = `Keyword JOIN` (must be in that column's dropdown),
   `Opt-In Date` = today (Chicago). From an unknown phone: a row in the `Opt-Ins` tab (auto-created:
   Timestamp, Phone, Keyword, MessageSid, Matched Row); strangers are never added to Customers.
-  Either way the reply is the opt-in confirmation (`JOIN_REPLY` in `main.py`).
+  Either way the reply is the opt-in confirmation (`JOIN_REPLY` in `main.py`), except for YES:
+  YES is a Twilio Advanced Opt-Out opt-in keyword, so Twilio already sends its own "You're
+  subscribed" reply; the webhook records the opt-in and returns empty TwiML (no double welcome).
+  Y is not a Twilio keyword, so Y still gets `JOIN_REPLY`.
 
 ## Tests
 `pip install -r requirements.txt pytest httpx && pytest -q`

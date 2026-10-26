@@ -146,6 +146,7 @@ def test_missing_creds_falls_back(monkeypatch):
     assert "Thanks Ryan, your pest control service is confirmed for Tue 10/27 at 9 AM." in post("Y")
     assert "Got it Ryan" in post("n")
     assert main.JOIN_REPLY in post("Y", frm="+15555550000")  # stranger Y = text-to-join
+    assert "<Message>" not in post("YES", frm="+15555550000")  # Twilio auto-replies to YES
     assert "No matching appointment found" in post("N", frm="+15555550000")
     assert "<Message>" not in post("HELP")
 
@@ -255,10 +256,15 @@ OK_ONLY_ROWS = [FULL_HEADER,
                 ["T-1", "Sam", "555.555.0199", "TRUE", "", "", "", "Tue 10/27 at 9 AM", "Sent", ""]]
 
 
-@pytest.mark.parametrize("word", ["Y", "y", " y ", "y.", "Y!", "YES", "yes", "Yes."])
+@pytest.mark.parametrize("word", ["Y", "y", " y ", "y.", "Y!", "YES", "yes", "Yes.", "Yes!", " YES "])
 def test_y_from_not_opted_in_customer_opts_in(full, word):
     t = post(word)
-    assert main.JOIN_REPLY in t and t.count("<Message>") == 1 and "confirmed for" not in t
+    if word.strip().rstrip(".!").upper() == "YES":
+        # Twilio Advanced Opt-Out already auto-replied to YES: empty TwiML from us.
+        assert "<Message>" not in t and "Response" in t
+    else:
+        assert main.JOIN_REPLY in t and t.count("<Message>") == 1
+    assert "confirmed for" not in t
     today = _dt.now(main.TZ).date().isoformat()
     assert {"range": "'Customers'!D2", "values": [[True]]} in full.writes
     assert {"range": "'Customers'!E2", "values": [["Opted in"]]} in full.writes
@@ -270,10 +276,13 @@ def test_y_from_not_opted_in_customer_opts_in(full, word):
     assert len(full.appends) == 1 and full.appends[0][2] == word and full.appends[0][4] == 2
 
 
-@pytest.mark.parametrize("word", ["Y", "y.", "YES"])
+@pytest.mark.parametrize("word", ["Y", "y.", "YES", "yes."])
 def test_y_from_stranger_goes_to_optins(full, word):
     t = post(word, frm="+15555550000", sid="SMy")
-    assert main.JOIN_REPLY in t
+    if word.rstrip(".").upper() == "YES":
+        assert "<Message>" not in t and "Response" in t  # Twilio sent the welcome
+    else:
+        assert main.JOIN_REPLY in t and t.count("<Message>") == 1
     assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
     assert "Opt-Ins" in full.added
     inbound, optin = full.appends
@@ -281,10 +290,12 @@ def test_y_from_stranger_goes_to_optins(full, word):
     assert optin[1:] == ["+15555550000", word.rstrip(".").upper(), "SMy", ""]
 
 
+@pytest.mark.parametrize("word", ["y.", "YES", "yes!"])
 @pytest.mark.parametrize("rows", [OPTED_ROWS, OK_ONLY_ROWS])
-def test_y_from_opted_in_customer_confirms(full, monkeypatch, rows):
+def test_y_from_opted_in_customer_confirms(full, monkeypatch, rows, word):
     monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
-    t = post("y.")
+    t = post(word)
+    assert t.count("<Message>") == 1  # confirm reply is unchanged for Y and YES
     assert "Thanks Sam, your pest control service is confirmed for Tue 10/27 at 9 AM." in t
     assert main.JOIN_REPLY not in t
     assert {"range": "'Customers'!J2", "values": [["Y"]]} in full.writes
@@ -311,3 +322,20 @@ def test_stop_start_help_silent_for_non_opted_in(full):
     for w in ("STOP", "START", "HELP", "stop."):
         assert "<Message>" not in post(w)
     assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
+
+
+def test_yes_join_write_failure_still_silent(full):
+    full.fail_writes = True
+    assert "<Message>" not in post("YES")
+    assert "<Message>" not in post("YES", frm="+15555550000")
+    assert main.JOIN_REPLY in post("Y", frm="+15555550000")
+
+
+@pytest.mark.parametrize("word", ["START", "start", "UNSTOP", "Unstop."])
+@pytest.mark.parametrize("frm", [PHONE, "+15555550000"])
+def test_start_unstop_send_nothing(full, word, frm):
+    t = post(word, frm=frm)
+    assert "<Message>" not in t and "Response" in t
+    assert not [w for w in full.writes if w["range"].startswith("'Customers'")]
+    assert "Opt-Ins" not in full.added
+    assert len(full.appends) == 1 and full.appends[0][2] == word  # Inbound Log only

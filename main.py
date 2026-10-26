@@ -268,6 +268,10 @@ JOIN_METHOD = "Keyword JOIN"  # must be in the Opt-In Method dropdown on the Cus
 # Y/YES is a confirm from an opted-in customer, and a text-to-join from anyone else
 # (the printed kit and site say "Text YES"; Y works too). Reuses JOIN_METHOD in the sheet.
 YES_WORDS = {"Y", "YES"}
+# YES is also a Twilio Advanced Opt-Out opt-in keyword on the Messaging Service, so Twilio
+# already auto-replies "You're subscribed..." to it. Record the opt-in but send nothing
+# ourselves for YES, so a new signup doesn't get two welcome texts. Y is not a Twilio keyword.
+TWILIO_OPTIN_WORDS = {"YES"}
 # Mirrors the opt-in message registered on the A2P campaign, with the "PestPod:" prefix.
 JOIN_REPLY = (
     "PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs per visit. "
@@ -403,7 +407,8 @@ def sms_webhook(
             mark_customer_opted_in(row)
         else:
             log_optin(phone, reply, MessageSid)
-        resp.message(JOIN_REPLY)
+        if reply not in TWILIO_OPTIN_WORDS:
+            resp.message(JOIN_REPLY)
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     if customer:
