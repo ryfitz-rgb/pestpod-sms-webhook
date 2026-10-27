@@ -1,12 +1,12 @@
 name: PestPod batch reminders
 
-# Wave 1 = days 1-3, wave 2 = days 15-17 (batch.py decides who gets texted).
+# Daily due nudge: batch.py texts customers whose Next Due is within 7 days (once per due cycle).
 # GitHub cron is UTC and has no DST: 15:30 UTC = 10:30 AM CDT / 9:30 AM CST,
 # 18:30 UTC = 1:30 PM CDT / 12:30 PM CST (idempotent retry in case the first run was late or failed).
 on:
   schedule:
-    - cron: "30 15 1-3,15-17 * *"
-    - cron: "30 18 1-3,15-17 * *"
+    - cron: "30 15 * * *"
+    - cron: "30 18 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -22,7 +22,7 @@ on:
         required: false
         default: ""
       force_wave:
-        description: "Ignore the date window: 1 or 2 (live requires only_phone)"
+        description: "1 = due nudge ignoring the Next Due window, 2 = appointment reminder (live requires only_phone)"
         required: false
         default: ""
 
