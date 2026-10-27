@@ -29,6 +29,7 @@ signature gets HTTP 403: no lookup, no sheet writes, no log rows, no TwiML; a wa
   `/health` and `/version` need no signature.
 
 ## Sheet writes
+- Reply to Y (opted-in customer, wants service): `PestPod: Got it! We'll text you a day and time soon.` Reminder Status stays "Confirmed Y" (no "awaiting time" value in the dropdown).
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
 - `Inbound Log` tab (auto-created): Timestamp (America/Chicago), Phone, Body, MessageSid, Matched Row.
 - "Opted in" = `Opt-In Status` is `Opted in` or `OK to Text?` is TRUE.
@@ -66,7 +67,7 @@ only gets filled after Ryan proposes a day/time and the customer replies Y.
 - **Writes after each send:** `Reminder Status` = `Nudge 1 sent`; a row in the `Outbound Log` tab
   (auto-created): Timestamp, Phone, Name, Wave, Body, MessageSid, Status, Row. `Wave` is no longer used or written.
 - **Quiet hours:** only sends 9:00 AM-8:00 PM Chicago; 1.5 s between texts; `BATCH_MAX_SENDS` cap (200).
-- Template (exact): `PestPod: You're due for pest service. Reply Y and we'll set a time.`
+- Template (exact): `PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out.`
   Sent via Messaging Service `MG7aa08d66618db7ad78ad6af28b793bf2`.
 - **Wave 2** (appointment reminder, old template `PestPod: Hi {Name}, your pest control service is scheduled for
   {Proposed Appointment}. Reply Y to confirm or N to reschedule. Reply STOP to opt out. Msg & data rates may apply.`)
