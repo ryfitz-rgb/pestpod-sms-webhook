@@ -76,18 +76,38 @@ def run(svc, now, dry_run=False, sender=None, **kw):
     return s, sender, sleeps
 
 
-# ---------------------------------------------------------------- due window
-@pytest.mark.parametrize("d,sends", [
-    (2, False),   # 8 days before Next Due 11/10
-    (3, True),    # 7 days before
-    (9, True), (10, True),
-    (17, True),   # 7 days overdue (grace)
-    (18, False),  # 8 days overdue
+# ---------------------------------------------------------------- due window (due MONTH)
+# Ryan Oct 26 2026: due in the Next Due month, no set day; nudge from the 1st, none after month end.
+@pytest.mark.parametrize("now,sends", [
+    ((2026, 10, 31, 13), False),  # month before the due month
+    ((2026, 11, 1, 10), True),    # 1st of the due month, morning run
+    ((2026, 11, 1, 13), True),
+    ((2026, 11, 2), True),        # missed the 1st: next run catches up
+    ((2026, 11, 10), True), ((2026, 11, 30, 13), True),
+    ((2026, 12, 1, 10), False),   # due month ended
+    ((2027, 1, 5), False),
 ])
-def test_due_window(d, sends):
+def test_due_window(now, sends):
     svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-11-10")])
-    _, snd, _ = run(svc, at(2026, 11, d))
+    _, snd, _ = run(svc, at(*now))
     assert (len(snd.sent) == 1) is sends
+
+
+def test_late_month_due_date_still_nudged_on_the_1st():
+    svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-12-26")])   # e.g. Cunningham on EOM
+    assert run(svc, at(2026, 11, 25))[1].sent == []
+    assert len(run(svc, at(2026, 12, 1))[1].sent) == 1
+
+
+def test_one_nudge_per_month_cycle_after_first_send():
+    svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-11-24", status="Not sent")],
+                  outbound=[log("+15555550101", ts="2026-11-01T10:30:00-05:00")])
+    for d in (1, 2, 15, 24, 30):
+        assert run(svc, at(2026, 11, d, 13))[1].sent == []
+    # an October send (previous cycle) doesn't block the November cycle
+    svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-11-24", status="Nudge 1 sent")],
+                  outbound=[log("+15555550101", ts="2026-10-01T10:30:00-05:00")])
+    assert len(run(svc, at(2026, 11, 1))[1].sent) == 1
 
 
 def test_runs_any_day_of_month_no_fixed_windows():
@@ -201,7 +221,7 @@ def test_wave2_forced_appointment_reminder():
 @pytest.mark.parametrize("kw,reason", [
     (dict(ok="FALSE"), "OK to Text"), (dict(ok=""), "OK to Text"), (dict(ok="#REF!"), "OK to Text"),
     (dict(opt="Opted out"), "Opt-In"), (dict(opt="opted in "), "Opt-In"), (dict(opt="Not asked"), "Opt-In"),
-    (dict(due=""), "no Next Due"), (dict(due="2026-12-10"), "days away"), (dict(due="2026-10-01"), "grace"),
+    (dict(due=""), "no Next Due"), (dict(due="2026-12-10"), "not started"), (dict(due="2026-10-31"), "has ended"),
     (dict(appt="Thu 2026-11-12 9:00 AM"), "already set"),
 ])
 def test_ineligible(kw, reason):

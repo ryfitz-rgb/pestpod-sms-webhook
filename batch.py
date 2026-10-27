@@ -1,11 +1,13 @@
 """
 PestPod batch reminder sender.
 
-Wave 1 = the due nudge. It runs every day (America/Chicago) and texts each eligible customer
-once per due cycle, starting NUDGE_LEAD_DAYS (7) before their Next Due date (the Customers
-tab's Next Due formula: Last Service Date + Frequency). Customers have no fixed appointments;
-Proposed Appointment only gets filled after Ryan proposes a day/time and the customer says Y.
-Anyone whose Next Due passed more than OVERDUE_GRACE_DAYS ago is not nudged automatically.
+Wave 1 = the due nudge. Customers are due in a MONTH, not on a day (Ryan, Oct 26 2026): every
+stop is due the month its Next Due falls in (the Customers tab's Next Due formula: Last Service
+Date + Frequency) and Ryan just finishes them by month end. The daily runs (10:30 AM / 1:30 PM
+CDT) text each eligible customer once per due cycle, starting on the 1st of their due month; a
+later run that month catches anyone missed (failed run, row added mid-month). Once the due month
+ends, that cycle gets no more texts. Customers have no fixed appointments; Proposed Appointment
+only gets filled after Ryan proposes a day/time and the customer says Y.
 
 Wave 2 (the old appointment reminder) is manual only: --force-wave 2 (live needs --only-phone).
 
@@ -29,7 +31,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import main
 from main import TZ, col_letter, normalize_phone, quote_tab
@@ -41,8 +43,6 @@ OUTBOUND_TAB = "Outbound Log"
 OUTBOUND_HEADERS = ["Timestamp", "Phone", "Name", "Wave", "Body", "MessageSid", "Status", "Row"]
 MESSAGING_SERVICE_SID = os.environ.get("TWILIO_MESSAGING_SERVICE_SID") or "MG7aa08d66618db7ad78ad6af28b793bf2"
 
-NUDGE_LEAD_DAYS = 7      # first text goes out this many days before Next Due
-OVERDUE_GRACE_DAYS = 7   # still nudge up to this many days after Next Due (missed runs)
 # Must match the Reminder Status column's strict ONE_OF_LIST validation.
 ALLOWED_STATUSES = ("Not sent", "Nudge 1 sent", "Nudge 2 sent", "Nudge 3 sent",
                     "Confirmed Y", "Reschedule N", "No reply")
@@ -186,10 +186,15 @@ def wave_sends(outbound, phone, wave):
             if normalize_phone(e["Phone"]) == phone and e["Wave"] == str(wave) and _counts_as_sent(e)]
 
 
+def due_month(d: date) -> str:
+    return f"{d.year:04d}-{d.month:02d}"
+
+
 def cycle_start(c: Customer, today: date):
-    """First day of this customer's current due cycle (sends on/after it count), or None."""
+    """First day of this customer's current due cycle = the 1st of the Next Due month (sends
+    on/after it count), or None."""
     nd = parse_appt_date(c.next_due, today)
-    return nd - timedelta(days=NUDGE_LEAD_DAYS + 1) if nd else None
+    return nd.replace(day=1) if nd else None
 
 
 def already_sent(c: Customer, wave: int, outbound, now: datetime):
@@ -235,11 +240,11 @@ def eligibility(c: Customer, wave: int, today: date, include_examples=False, for
         nd = parse_appt_date(c.next_due, today)
         if nd is None:
             return f"Next Due {c.next_due!r} unreadable"
-        days = (nd - today).days
-        if days > NUDGE_LEAD_DAYS:
-            return f"Next Due {nd.isoformat()} is {days} days away (nudge starts {NUDGE_LEAD_DAYS} days before)"
-        if days < -OVERDUE_GRACE_DAYS:
-            return f"Next Due {nd.isoformat()} was {-days} days ago (past the {OVERDUE_GRACE_DAYS}-day grace)"
+        if (nd.year, nd.month) > (today.year, today.month):
+            return (f"Next Due {nd.isoformat()}: due month {due_month(nd)} not started "
+                    f"(nudge goes out from {nd.replace(day=1).isoformat()})")
+        if (nd.year, nd.month) < (today.year, today.month):
+            return f"Next Due {nd.isoformat()}: due month {due_month(nd)} has ended (no more texts this cycle)"
         return ""
     # wave 2: appointment reminder
     if not c.appt:

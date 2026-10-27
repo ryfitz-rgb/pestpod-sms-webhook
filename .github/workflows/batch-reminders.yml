@@ -1,6 +1,6 @@
 name: PestPod batch reminders
 
-# Daily due nudge: batch.py texts customers whose Next Due is within 7 days (once per due cycle).
+# Daily due nudge: batch.py texts customers whose Next Due falls in the current month, from the 1st (once per due cycle).
 # GitHub cron is UTC and has no DST: 15:30 UTC = 10:30 AM CDT / 9:30 AM CST,
 # 18:30 UTC = 1:30 PM CDT / 12:30 PM CST (idempotent retry in case the first run was late or failed).
 on:

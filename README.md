@@ -57,12 +57,14 @@ webhook write.
 Customers have no fixed appointments. The first text is a **due nudge** based on `Next Due`
 (the Customers formula: `Last Service Date` + `Frequency`; EOM = every 2 months). `Proposed Appointment`
 only gets filled after Ryan proposes a day/time and the customer replies Y.
-- **When:** runs daily (America/Chicago). A customer is nudged once their `Next Due` is 7 days away or
-  closer, up to 7 days after it (catches missed runs). Further out or more overdue: no automatic text.
+- **When:** customers are due in a **month**, not on a day: the month their `Next Due` falls in (Ryan just
+  finishes every stop by month end). The daily runs (10:30 AM / 1:30 PM CDT) nudge each customer once,
+  starting on the 1st of their due month; a later run that month catches anyone missed. Once the due month
+  ends, that cycle gets no more texts. Due month not started yet: no text.
 - **Eligible:** `OK to Text?` TRUE, `Opt-In Status` = `Opted in`, valid phone, a readable `Next Due`,
   no `Proposed Appointment` set for today or later, `Reminder Status` not starting with `Excluded`.
   `EXAMPLE DATA` / `EX-` rows are never texted.
-- **Once per due cycle:** no second nudge for the same `Next Due` (Outbound Log, plus the row stamp if the
+- **Once per due cycle (due month):** no second nudge for the same `Next Due` month (Outbound Log, plus the row stamp if the
   log has nothing). When `Last Service Date` moves forward, the next cycle gets a new nudge.
 - **Writes after each send:** `Reminder Status` = `Nudge 1 sent`; a row in the `Outbound Log` tab
   (auto-created): Timestamp, Phone, Name, Wave, Body, MessageSid, Status, Row. `Wave` is no longer used or written.
