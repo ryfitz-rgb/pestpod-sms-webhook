@@ -6,7 +6,7 @@ from batch import TZ
 
 HEADER = ["Account", "Customer Name", "Phone (+1XXXXXXXXXX)", "Next Due", "Wave", "OK to Text?", "Opt-In Status",
           "Proposed Appointment", "Reminder Status", "Last Reply"]
-NUDGE = "PestPod: You're due for pest service. Reply Y and we'll set a time."
+NUDGE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 
 
 def row(acct, name, phone, due="2026-11-10", wave="", ok="TRUE", opt="Opted in", appt="",

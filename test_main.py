@@ -74,7 +74,7 @@ def post(body, frm=PHONE, sid="SM123"):
 
 def test_yes_confirms_and_writes(svc):
     t = post("y")
-    assert "Thanks Sam, your pest control service is confirmed for Tue 2026-10-27 9:00 AM." in t
+    assert "text you a day and time soon" in t
     assert {"range": "'Customers'!G3", "values": [["Y"]]} in svc.writes
     assert {"range": "'Customers'!F3", "values": [["Confirmed Y"]]} in svc.writes
     assert svc.added == ["Inbound Log"]
@@ -85,7 +85,7 @@ def test_yes_confirms_and_writes(svc):
 
 
 def test_yes_word(svc):
-    assert "confirmed for" in post("YES")
+    assert "text you a day and time soon" in post("YES")
 
 
 def test_no_reschedules(svc):
@@ -133,7 +133,7 @@ def test_combined_failure_retries_last_reply(svc, monkeypatch):
             return Exec(lambda: (_ for _ in ()).throw(RuntimeError("validation")))
         return orig(spreadsheetId, body)
     monkeypatch.setattr(svc, "batchUpdate", flaky)
-    assert "confirmed for" in post("Y")
+    assert "text you a day and time soon" in post("Y")
     data_calls = [c["data"] for c in calls if "data" in c]
     assert len(data_calls) == 2 and len(data_calls[1]) == 1
     assert {"range": "'Customers'!G3", "values": [["Y"]]} in svc.writes
@@ -142,7 +142,7 @@ def test_combined_failure_retries_last_reply(svc, monkeypatch):
 
 def test_write_failure_still_replies(svc):
     svc.fail_writes = True
-    assert "confirmed for" in post("Y")
+    assert "text you a day and time soon" in post("Y")
 
 
 def test_missing_creds_falls_back(monkeypatch):
@@ -150,7 +150,7 @@ def test_missing_creds_falls_back(monkeypatch):
     monkeypatch.setattr(main, "_service_failed", False)
     monkeypatch.delenv("GOOGLE_SA_JSON_B64", raising=False)
     monkeypatch.setattr(main, "TEST_PHONE", PHONE)
-    assert "Thanks Ryan, your pest control service is confirmed for Tue 10/27 at 9 AM." in post("Y")
+    assert "text you a day and time soon" in post("Y")
     assert "Got it Ryan" in post("n")
     assert main.JOIN_REPLY in post("Y", frm="+15555550000")  # stranger Y = text-to-join
     assert "<Message>" not in post("YES", frm="+15555550000")  # Twilio auto-replies to YES
@@ -163,14 +163,14 @@ def test_invalid_creds_falls_back(monkeypatch, capsys, caplog):
     monkeypatch.setattr(main, "_service_failed", False)
     monkeypatch.setenv("GOOGLE_SA_JSON_B64", base64.b64encode(b'{"private_key":"SECRETKEY"}').decode())
     monkeypatch.setattr(main, "TEST_PHONE", PHONE)
-    assert "Thanks Ryan" in post("Y")
+    assert "text you a day and time soon" in post("Y")
     assert "SECRETKEY" not in caplog.text + capsys.readouterr().out
 
 
 def test_read_failure_falls_back(svc, monkeypatch):
     monkeypatch.setattr(svc, "get", lambda *a, **k: Exec(lambda: (_ for _ in ()).throw(RuntimeError())))
     monkeypatch.setattr(main, "TEST_PHONE", PHONE)
-    assert "Thanks Ryan" in post("Y")
+    assert "text you a day and time soon" in post("Y")
 
 
 def test_normalize():
@@ -271,7 +271,7 @@ def test_y_from_not_opted_in_customer_opts_in(full, word):
         assert "<Message>" not in t and "Response" in t
     else:
         assert main.JOIN_REPLY in t and t.count("<Message>") == 1
-    assert "confirmed for" not in t
+    assert "text you a day and time soon" not in t
     today = _dt.now(main.TZ).date().isoformat()
     assert {"range": "'Customers'!D2", "values": [[True]]} in full.writes
     assert {"range": "'Customers'!E2", "values": [["Opted in"]]} in full.writes
@@ -303,7 +303,7 @@ def test_y_from_opted_in_customer_confirms(full, monkeypatch, rows, word):
     monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
     t = post(word)
     assert t.count("<Message>") == 1  # confirm reply is unchanged for Y and YES
-    assert "Thanks Sam, your pest control service is confirmed for Tue 10/27 at 9 AM." in t
+    assert "text you a day and time soon" in t
     assert main.JOIN_REPLY not in t
     assert {"range": "'Customers'!J2", "values": [["Y"]]} in full.writes
     assert {"range": "'Customers'!I2", "values": [["Confirmed Y"]]} in full.writes
@@ -361,7 +361,7 @@ def call_direct(body, frm=PHONE, sid="SMbg"):
 
 
 @pytest.mark.parametrize("body,expect,row_writes", [
-    ("Y", "Thanks Sam, your pest control service is confirmed for Tue 2026-10-27 9:00 AM.",
+    ("Y", "text you a day and time soon",
      [{"range": "'Customers'!G3", "values": [["Y"]]}, {"range": "'Customers'!F3", "values": [["Confirmed Y"]]}]),
     ("N", "Got it Sam, we'll reschedule",
      [{"range": "'Customers'!G3", "values": [["N"]]}, {"range": "'Customers'!F3", "values": [["Reschedule N"]]}]),
@@ -404,7 +404,7 @@ def test_background_failure_logged_not_raised(svc, monkeypatch, caplog):
     monkeypatch.setattr(main, "update_customer_reply", boom)
     monkeypatch.setattr(main, "log_inbound", boom)
     caplog.set_level(logging.WARNING, logger="pestpod")
-    assert "confirmed for" in post("Y")
+    assert "text you a day and time soon" in post("Y")
     assert "background boom failed (RuntimeError)" in caplog.text
 
 
@@ -417,7 +417,7 @@ def test_stale_cache_served_and_refreshed_in_background(svc, monkeypatch):
         gate.wait(5); r = orig(*a, **k); done.set(); return r
     monkeypatch.setattr(svc, "get", slow_get)
     t, _ = call_direct("Y")  # must not block on the slow read
-    assert "confirmed for" in t
+    assert "text you a day and time soon" in t
     gate.set(); assert done.wait(5)
     for _ in range(50):
         if not main._refreshing.is_set(): break
@@ -431,7 +431,7 @@ def test_very_old_cache_reads_synchronously(svc, monkeypatch):
     reads = []
     orig = svc.get
     monkeypatch.setattr(svc, "get", lambda *a, **k: (reads.append(1), orig(*a, **k))[1])
-    assert "confirmed for" in call_direct("Y")[0]
+    assert "text you a day and time soon" in call_direct("Y")[0]
     assert reads == [1]
 
 
@@ -450,7 +450,7 @@ def test_write_refreshes_cache_for_next_reply(full, monkeypatch):
         return Exec(run)
     monkeypatch.setattr(full, "batchUpdate", bu)
     assert main.JOIN_REPLY in post("Y")
-    assert "Thanks Sam" in post("Y")
+    assert "text you a day and time soon" in post("Y")
 
 
 def test_lifespan_warms_cache(svc):
@@ -489,7 +489,7 @@ def enforced(svc, monkeypatch):
 def test_valid_signature_accepted(enforced):
     r = signed_post("y")
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
-    assert "Thanks Sam, your pest control service is confirmed" in html.unescape(r.text)
+    assert "text you a day and time soon" in html.unescape(r.text)
     assert {"range": "'Customers'!F3", "values": [["Confirmed Y"]]} in enforced.writes
     assert enforced.appends and enforced.appends[0][2] == "y"
 
@@ -544,7 +544,7 @@ def test_public_url_override(enforced, monkeypatch):
 
 def test_token_unset_passthrough_warns(svc, caplog):
     r = signed_post("y", sig=False)
-    assert r.status_code == 200 and "confirmed for" in html.unescape(r.text)
+    assert r.status_code == 200 and "text you a day and time soon" in html.unescape(r.text)
     assert "signature validation is OFF" in caplog.text
     r = signed_post("y", sig="garbage")
     assert r.status_code == 200
@@ -574,3 +574,8 @@ def test_health_and_version_need_no_signature(monkeypatch):
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
     assert client.get("/health").status_code == 200
     assert client.get("/version").status_code == 200
+
+
+def test_confirm_reply_exact_text():
+    assert main.confirm_reply("Sam", "Tue 10/27 at 9 AM") == "PestPod: Got it! We'll text you a day and time soon."
+    assert main.confirm_reply().isascii() and len(main.confirm_reply()) <= 160

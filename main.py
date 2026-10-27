@@ -442,11 +442,13 @@ DEFAULT_NAME = "Ryan"
 DEFAULT_APPT = "Tue 10/27 at 9 AM"
 
 
-def confirm_reply(name: str, appointment: str) -> str:
-    return (
-        f"PestPod: Thanks {name}, your pest control service is confirmed for {appointment}. "
-        "Reply HELP for help, STOP to opt out."
-    )
+CONFIRM_REPLY = "PestPod: Got it! We'll text you a day and time soon."
+
+
+def confirm_reply(name: str = "", appointment: str = "") -> str:
+    # Y from an opted-in customer = wants service; office texts a day/time (Ryan, Oct 26 2026).
+    # Status stays "Confirmed Y" (the Customers dropdown has no "awaiting time" value).
+    return CONFIRM_REPLY
 
 
 def reschedule_reply(name: str) -> str:

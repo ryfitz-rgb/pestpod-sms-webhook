@@ -51,7 +51,7 @@ REPLIED_STATUSES = ("Confirmed Y", "Reschedule N")
 QUIET_START_HOUR, QUIET_END_HOUR = 9, 20  # send only 9:00 AM - 8:00 PM Chicago
 
 # Wave 1 due nudge, exact wording approved by Ryan (plain ASCII apostrophes keep it GSM-7 / 1 segment).
-TEMPLATE = "PestPod: You're due for pest service. Reply Y and we'll set a time."
+TEMPLATE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 # Wave 2 (manual only): appointment reminder, used once a Proposed Appointment exists.
 APPT_TEMPLATE = ("PestPod: Hi {name}, your pest control service is scheduled for {appt}. "
                  "Reply Y to confirm or N to reschedule. Reply STOP to opt out. Msg & data rates may apply.")
