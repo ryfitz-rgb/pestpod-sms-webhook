@@ -186,3 +186,52 @@ def test_unauthenticated_cancel_redirects(fs):
         r = c.post(p, data={"row": 2, "acct": "1001", "csrf": "x"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/dashboard/login"
     assert not fs.written
+
+
+def test_clean_phone():
+    assert dash.clean_phone("(504) 555-0123") == "+15045550123"
+    assert dash.clean_phone("1-504-555-0123") == "+15045550123"
+    assert dash.clean_phone("+15045550123") == "+15045550123"
+    assert dash.clean_phone("") == ""
+    for bad in ("555-0123", "12345678901234", "(004) 555-0123", "abc"):
+        with pytest.raises(ValueError):
+            dash.clean_phone(bad)
+
+
+def test_edit_writes_only_phone_address_city_and_undo(fs):
+    fs.tabs["Customers"][1][2:5] = ["", "1 Old St", "Metairie"]
+    fs.tabs["Customers"][1][11] = "Not opted in"
+    assert dash.write_edit(2, "1001", "504.555.0123", "  22  New Rd ", "Kenner") == "saved"
+    r = fs.tabs["Customers"][1]
+    assert r[2:5] == ["+15045550123", "22 New Rd", "Kenner"]
+    assert r[11] == "Not opted in" and r[10] is True  # opt-in / OK to Text untouched
+    assert {l for t, l, _ in fs.written if t == "Customers"} == {"C", "D", "E"}
+    assert fs.tabs["Undo Log"][1][7] == "edit"
+    assert dash.undo_last(2, "1001") == "undone"
+    assert fs.tabs["Customers"][1][2:5] == ["", "1 Old St", "Metairie"]
+
+
+def test_edit_bad_phone_and_nochange(fs):
+    with pytest.raises(ValueError):
+        dash.write_edit(2, "1001", "555-0123", "x", "y")
+    assert not fs.written
+    fs.tabs["Customers"][1][2:5] = ["+15045550123", "1 Old St", "Metairie"]
+    assert dash.write_edit(2, "1001", "(504) 555-0123", "1 Old St", "Metairie") == "nochange"
+    with pytest.raises(ValueError):
+        dash.write_edit(2, "9999", "", "a", "b")  # account mismatch
+
+
+def test_edit_route(fs):
+    c = TestClient(main.app)
+    r = c.post("/dashboard/edit", data={"row": 2, "acct": "1001", "address": "x", "csrf": "x"}, follow_redirects=False)
+    assert r.headers["location"] == "/dashboard/login" and not fs.written
+    csrf = _login(c)
+    assert "/dashboard/edit" in c.get("/dashboard").text
+    assert c.post("/dashboard/edit", data={"row": 2, "acct": "1001", "phone": "123", "csrf": csrf},
+                  follow_redirects=False).headers["location"] == "/dashboard?msg=badphone"
+    r = c.post("/dashboard/edit", data={"row": 2, "acct": "1001", "phone": "5045550123", "address": "9 A St",
+                                        "city": "Kenner", "csrf": csrf}, follow_redirects=False)
+    assert r.headers["location"] == "/dashboard?msg=edited&row=2"
+    assert c.post("/dashboard/edit", data={"row": 2, "acct": "1001", "address": "z"},
+                  follow_redirects=False).status_code == 403  # no CSRF
+    c.cookies.clear()

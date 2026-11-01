@@ -50,6 +50,10 @@ UNDO_TAB = "Undo Log"
 UNDO_HEADERS = ["Timestamp CT", "Row", "Account", "Customer", "Old Last Service", "New Last Service", "Undone",
                 "Action", "Old Status", "New Status"]
 PROTECTED_LETTERS = ("I", "K")
+PHONE_COL = "Phone (+1XXXXXXXXXX)"
+EDIT_COLS = (PHONE_COL, "Address", "City")  # the only columns Edit may write
+NEVER_EDIT = {"next due", "ok to text?", "opt-in status", "opt-in method", "opt-in date", "reminder status",
+              "wave", "last reply"}
 
 _fail = {}  # ip -> (count, first_ts)
 _fail_lock = threading.Lock()
@@ -247,6 +251,7 @@ def view_row(d, today: date):
     return {
         "row": d["_row"], "acct": str(d.get("Account", "")), "name": str(_get(d, "Customer Name", "Name")),
         "address": str(d.get("Address", "")), "city": str(d.get("City", "")),
+        "phone": str(_get(d, "Phone (+1XXXXXXXXXX)", "Phone")).strip(),
         "has_phone": bool(str(_get(d, "Phone (+1XXXXXXXXXX)", "Phone")).strip()),
         "service": str(d.get("Service Type", "")), "freq": str(d.get("Frequency", "")),
         "last": ls, "next_due": nd, "eff": eff, "pushed": pushed,
@@ -292,8 +297,70 @@ def read_undo_log(svc, m):
     return out
 
 
+def edit_state(d) -> str:
+    import json
+    return json.dumps({c: str(d.get(c, "") if d.get(c) is not None else "").strip() for c in EDIT_COLS},
+                      sort_keys=True)
+
+
 def current_value(d, action):
-    return norm_date(d.get(H_COL)) if action == "serviced" else status_state(d)
+    if action == "serviced":
+        return norm_date(d.get(H_COL))
+    if action == "edit":
+        return edit_state(d)
+    return status_state(d)
+
+
+def clean_phone(raw) -> str:
+    """'' stays ''; any 10-digit US number (or 1 + 10) -> +1XXXXXXXXXX; else ValueError."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10 or digits[0] in "01":
+        raise ValueError("bad phone")
+    return "+1" + digits
+
+
+def _write_edit_cells(svc, m, header, row, values: dict):
+    tab = m.quote_tab(m.CUSTOMERS_TAB)
+    data = []
+    for col, val in values.items():
+        if col not in EDIT_COLS:
+            raise RuntimeError("refusing to edit that column")
+        idx = _col_index(header, col)
+        if header[idx].strip().lower() in NEVER_EDIT:
+            raise RuntimeError("refusing to edit that column")
+        letter = _safe_letter(m, header, idx, ("H",))
+        data.append({"range": f"{tab}!{letter}{row}", "values": [[val]]})
+    svc.spreadsheets().values().batchUpdate(spreadsheetId=m.SHEET_ID, body={
+        "valueInputOption": "RAW", "data": data}).execute()
+
+
+def write_edit(row: int, acct: str, phone: str, address: str, city: str):
+    """Returns 'saved' or 'nochange'. Raises ValueError('bad phone') for invalid numbers.
+    Writes ONLY phone/address/city; never touches opt-in/consent/status columns (no auto opt-in)."""
+    import json
+    m = _main()
+    svc = m.get_sheets()
+    p = clean_phone(phone)
+    data = fetch_rows(force=True)
+    d = _verify_row(data, row, acct)
+    header = data["header"]
+    new = {PHONE_COL: p, "Address": " ".join(address.split())[:200], "City": " ".join(city.split())[:80]}
+    new = {k: v for k, v in new.items() if k in header}
+    old_state = edit_state(d)
+    new_full = json.loads(old_state)
+    new_full.update(new)
+    new_state = json.dumps(new_full, sort_keys=True)
+    if new_state == old_state:
+        return "nochange"
+    append_undo(svc, m, row, d, "edit", old_s=old_state, new_s=new_state)
+    _write_edit_cells(svc, m, header, row, new)
+    fetch_rows(force=True)
+    return "saved"
 
 
 def undo_candidate(data, row: int):
@@ -407,6 +474,10 @@ def undo_last(row: int, acct: str):
         svc.spreadsheets().values().update(
             spreadsheetId=m.SHEET_ID, range=f"{tab}!{letter}{row}", valueInputOption="USER_ENTERED",
             body={"values": [[e_["Old Last Service"]]]}).execute()
+    elif e_["Action"] == "edit":
+        import json
+        old = {k: v for k, v in json.loads(e_["Old Status"]).items() if k in data["header"]}
+        _write_edit_cells(svc, m, data["header"], row, old)
     else:
         _write_status(svc, m, data["header"], row, e_["Old Status"].strip())
     svc.spreadsheets().values().update(
@@ -484,6 +555,8 @@ input[type=text],input[type=password],input[type=date],input[type=search]{width:
 .btn{display:inline-block;border:0;border-radius:10px;padding:11px 14px;font-size:15px;font-weight:600;cursor:pointer;background:var(--g2);color:#fff}
 .btn.full{width:100%;margin-top:18px}.btn.ghost{background:#fff;color:var(--g);border:1px solid var(--g2)}.btn.sm{padding:8px 11px;font-size:14px}
 .err{background:#fdecea;color:#8a1f17;border-radius:10px;padding:10px 12px;margin-top:12px;font-size:14px}
+details.edit{width:100%}details.edit summary{list-style:none;display:inline-block}details.edit summary::-webkit-details-marker{display:none}
+details.edit form{margin-top:8px}details.edit input{margin-bottom:6px}
 .ok{background:var(--lg);color:var(--g);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:14px}
 .bar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.bar input{flex:1;min-width:200px}
 .sum{color:var(--mut);font-size:13px}
@@ -601,6 +674,13 @@ def _card(v, csrf, today):
              f"<button class=\"btn sm ghost\" type=submit>Cancel</button></form>")
     if v.get("undoable"):
         extra += _undo_form(v, csrf)
+    extra += (f"<details class=edit><summary class=\"btn sm ghost\">Edit</summary>"
+              f"<form method=post action=\"/dashboard/edit\">{hidden}"
+              f"<label>Phone<input type=tel name=phone value=\"{e(v.get('phone', ''))}\" placeholder=\"(504) 555-0123\" inputmode=tel></label>"
+              f"<label>Address<input type=text name=address value=\"{e(v['address'])}\" maxlength=200></label>"
+              f"<label>City<input type=text name=city value=\"{e(v['city'])}\" maxlength=80></label>"
+              f"<button class=\"btn sm\" type=submit>Save</button></form>"
+              f"<div class=meta>Changing the phone does not opt them in to texts.</div></details>")
     return f"""<div class="cust{' overdue' if v['overdue'] else ''}" data-s="{search}">
 <div class=top><div><div class=nm>{e(v['name'])}</div><div class=addr>{addr_html}</div></div>
 <div class=meta>Acct {e(v['acct'])}</div></div>
@@ -768,9 +848,12 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
              "undone": "Undone. The previous value is back.",
              "changed": "That was already changed since, so it can't be undone from here.",
              "noundo": "Nothing to undo for that customer.",
+             "edited": "Saved. Phone/address updated (this does not opt anyone in to texts).",
+             "nochange": "Nothing changed.",
+             "badphone": "That phone number doesn't look right. Use a 10-digit US number, like (504) 555-0123.",
              "err": "That didn't save. Refresh and try again."}.get(msg, "")
     fu = None
-    if msg in ("serviced", "cancelled", "reactivated") and row:
+    if msg in ("serviced", "cancelled", "reactivated", "edited") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
     return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu)))
 
@@ -870,4 +953,19 @@ def undo(request: Request, row: int = Form(...), acct: str = Form(...), csrf: st
         r = undo_last(row, acct)
         log.info("dashboard: row %s (%s) undo -> %s", row, acct, r)
         return "/dashboard?msg=" + {"undone": "undone", "changed": "changed"}.get(r, "noundo")
+    return _simple_post(request, csrf, row, go)
+
+
+@router.post("/dashboard/edit")
+def edit(request: Request, row: int = Form(...), acct: str = Form(...), phone: str = Form(""),
+         address: str = Form(""), city: str = Form(""), csrf: str = Form("")):
+    def go():
+        try:
+            r = write_edit(row, acct, phone, address, city)
+        except ValueError as ex:
+            if str(ex) == "bad phone":
+                return "/dashboard?msg=badphone"
+            raise
+        log.info("dashboard: row %s (%s) edit -> %s", row, acct, r)
+        return f"/dashboard?msg=edited&row={row}" if r == "saved" else "/dashboard?msg=nochange"
     return _simple_post(request, csrf, row, go)
