@@ -299,7 +299,7 @@ CSS = """
 *{box-sizing:border-box}body{margin:0;font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#f5f8f5}
 header{background:var(--g);color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:5;box-shadow:0 2px 6px rgba(0,0,0,.15)}
 header img{width:36px;height:36px;border-radius:9px}header .t{font-weight:700;font-size:18px;letter-spacing:.2px}header .s{opacity:.8;font-size:13px}
-header form{margin-left:auto}header button{background:transparent;border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px}
+header button{background:transparent;border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px}
 main{max-width:980px;margin:0 auto;padding:14px 12px 60px}
 .card{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
 .narrow{max-width:380px;margin:9vh auto}
@@ -327,8 +327,35 @@ details.notes{font-size:13px;color:var(--mut);margin-top:6px}details.notes summa
 .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}.acts form{display:flex;gap:6px;align-items:center;margin:0}
 .acts input[type=date]{width:auto;padding:7px 8px;font-size:15px}
 footer{color:var(--mut);font-size:12px;text-align:center;margin-top:30px}
+.tt{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0!important;border-radius:50%!important;cursor:pointer}
+header form{margin-left:8px}.tt svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.tt .i-sun{display:none}html[data-theme=dark] .tt .i-sun{display:block}html[data-theme=dark] .tt .i-moon{display:none}
+.tt:focus-visible{outline:2px solid #fff;outline-offset:2px}
+html[data-theme=dark]{color-scheme:dark;--g:#14301f;--g2:#3a9a62;--lg:#1d3326;--ink:#e3ece6;--mut:#9fb1a6;--bd:#2c3b32}
+html[data-theme=dark] body{background:#0f1512}
+html[data-theme=dark] .card,html[data-theme=dark] .cust,html[data-theme=dark] input,html[data-theme=dark] .btn.ghost{background:#17201b;color:var(--ink)}
+html[data-theme=dark] .btn.ghost{color:#8fd3a8}html[data-theme=dark] .cust.overdue{background:#24171a}
+html[data-theme=dark] .tag{background:#24302a;color:#c9d6ce}html[data-theme=dark] .tag.red,html[data-theme=dark] .err{background:#3b1d1b;color:#f3b4ae}
+html[data-theme=dark] .tag.grn,html[data-theme=dark] .ok,html[data-theme=dark] .count{color:#8fd3a8}html[data-theme=dark] .tag.amb{background:#3a2e12;color:#f0cf8a}
+html[data-theme=dark] .tag.blu{background:#16263a;color:#9cc3ef}html[data-theme=dark] .pref b{color:#8fd3a8}html[data-theme=dark] .od-h{color:#f08a82}
 @media(max-width:560px){.top{flex-direction:column}.acts{flex-direction:column;align-items:stretch}.acts form{width:100%}.acts form .btn{flex:1}.acts input[type=date]{flex:1}}
 """
+
+
+THEME_INIT = ("<script>(function(){var t;try{t=localStorage.getItem('pestpod-theme')}catch(x){}"
+              "if(t!=='dark'&&t!=='light')t=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';"
+              "document.documentElement.setAttribute('data-theme',t)})()</script>")
+
+THEME_TOGGLE = ("<button type=button class=tt id=theme-toggle aria-label='Toggle dark mode' title='Toggle dark mode'>"
+                "<svg class=i-moon viewBox='0 0 24 24' aria-hidden=true><path d='M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'/></svg>"
+                "<svg class=i-sun viewBox='0 0 24 24' aria-hidden=true><circle cx=12 cy=12 r=4.5/>"
+                "<path d='M12 1.5v2.5M12 20v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M1.5 12H4M20 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8'/></svg></button>")
+
+THEME_SCRIPT = ("<script>(function(){var b=document.getElementById('theme-toggle');if(!b)return;var d=document.documentElement;"
+                "function sync(){var k=d.getAttribute('data-theme')==='dark';b.setAttribute('aria-pressed',k?'true':'false');"
+                "var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',k?'#14301f':'#1f5132')}"
+                "sync();b.addEventListener('click',function(){var t=d.getAttribute('data-theme')==='dark'?'light':'dark';"
+                "d.setAttribute('data-theme',t);try{localStorage.setItem('pestpod-theme',t)}catch(x){}sync()})})()</script>")
 
 
 def e(s):
@@ -341,7 +368,7 @@ def _page(title, body, header=""):
             f"<meta name=robots content='noindex,nofollow'><meta name=theme-color content='#1f5132'>"
             f"<link rel=icon href='/dashboard/static/pestpod-logo.png'>"
             f"<link rel=apple-touch-icon href='/dashboard/static/apple-touch-icon.png'>"
-            f"<title>{e(title)} · PestPod</title><style>{CSS}</style></head><body>{header}<main>{body}</main></body></html>")
+            f"<title>{e(title)} · PestPod</title>{THEME_INIT}<style>{CSS}</style></head><body>{header}<main>{body}</main>{THEME_SCRIPT}</body></html>")
 
 
 def _login_page(csrf, error=""):
@@ -353,7 +380,9 @@ def _login_page(csrf, error=""):
 <label for=p>Password</label><input id=p name=password type=password autocomplete=current-password required>
 <button class="btn full" type=submit>Sign in</button>{err}</form></div>
 <footer>PestPod · pestpod.ai</footer>"""
-    return _page("Sign in", body)
+    hdr = (f"<header><img src=\"/dashboard/static/pestpod-logo.png\" alt=\"\"><div><div class=t>PestPod</div>"
+           f"<div class=s>Route dashboard</div></div>{THEME_TOGGLE}</header>")
+    return _page("Sign in", body, hdr)
 
 
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
@@ -422,7 +451,7 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False):
         parts.append(f"<details class=month{is_open}><summary><span{cls}>{e(label)}</span><span class=count>{len(lst)}</span></summary>"
                      + "".join(_card(v, csrf, today) for v in lst) + "</details>")
     fl = f"<div class=ok role=status>{e(flash)}</div>" if flash else ""
-    hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>
+    hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{THEME_TOGGLE}
 <form method=post action="/dashboard/logout"><input type=hidden name=csrf value="{e(csrf)}"><button type=submit>Sign out</button></form></header>"""
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
 <a class="btn sm ghost" href="/dashboard">Refresh</a></div>

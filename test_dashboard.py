@@ -43,3 +43,19 @@ def test_view_row_override_and_hidden():
 
 def test_version_unchanged():
     assert "commit" in c.get("/version").json()
+
+
+def test_theme_toggle_on_login_page():
+    import dashboard as d
+    h = d._login_page("tok")
+    assert 'id=theme-toggle' in h and "localStorage" in h
+    assert h.index("prefers-color-scheme") < h.index("<style>")  # init runs before paint
+    assert 'name=csrf value="tok"' in h
+
+
+def test_theme_toggle_on_dashboard():
+    import dashboard as d
+    from datetime import date
+    h = d.render_dashboard([], "c123", date(2026, 11, 1))
+    assert 'id=theme-toggle' in h and "html[data-theme=dark]" in h
+    assert "c123" in h and "/dashboard/logout" in h
