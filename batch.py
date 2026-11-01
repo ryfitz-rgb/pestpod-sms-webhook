@@ -59,6 +59,7 @@ APPT_TEMPLATE = ("PestPod: Hi {name}, your pest control service is scheduled for
 H_ACCOUNT, H_NAME, H_PHONE = "account", ("customer name", "name"), main.PHONE_HEADERS
 H_WAVE, H_OK, H_OPTIN = "wave", "ok to text?", "opt-in status"
 H_APPT, H_STATUS, H_NEXT_DUE = "proposed appointment", "reminder status", "next due"
+H_CUST_STATUS = "status"  # optional dashboard column: blank/Active or Cancelled
 
 
 # ---------------------------------------------------------------- pure logic
@@ -114,6 +115,11 @@ class Customer:
     appt: str
     status: str
     next_due: str = ""
+    cust_status: str = ""
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self.cust_status.strip().lower() == "cancelled"
 
     @property
     def is_example(self) -> bool:
@@ -158,6 +164,7 @@ def parse_customers(values):
             phone=normalize_phone(cell(pcol)),
             ok_to_text=is_true(cell(cols[H_OK])), opt_in=cell(cols[H_OPTIN]),
             appt=cell(cols[H_APPT]), status=cell(cols[H_STATUS]), next_due=cell(cols[H_NEXT_DUE]),
+            cust_status=cell(cols.get(H_CUST_STATUS)),
         ))
     return cols, out
 
@@ -220,6 +227,8 @@ def eligibility(c: Customer, wave: int, today: date, include_examples=False, for
     """Return '' if eligible, else the skip reason."""
     if c.is_example and not include_examples:
         return "example row"
+    if c.is_cancelled:
+        return "customer is Cancelled"
     if c.status.lower().startswith("excluded"):
         return f"Reminder Status is {c.status!r}"
     if not c.ok_to_text:

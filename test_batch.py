@@ -359,3 +359,20 @@ def test_force_wave_live_requires_only_phone_and_ignores_due_window():
 def test_cli_rejects_now_in_live_mode():
     with pytest.raises(SystemExit):
         batch.main_cli(["--now", "2026-11-01T10:00"])
+
+
+def test_cancelled_rows_are_skipped():
+    hdr = HEADER + ["Status", "Cancelled On"]
+    rows = [row("A", "Al", "+15555550101") + ["Cancelled", "2026-11-01"],
+            row("B", "Bo", "+15555550102") + ["Active", ""],
+            row("C", "Cy", "+15555550103")]
+    custs = batch.parse_customers([hdr] + rows)[1]
+    plan = batch.build_plan(custs, [], at(2026, 11, 5))
+    sent = {c.name for c in plan.sends}
+    assert sent == {"Bo", "Cy"}
+    assert any(c.name == "Al" and "Cancelled" in r for c, r in plan.skips)
+
+
+def test_no_status_column_still_works():
+    plan = batch.build_plan(batch.parse_customers([HEADER, row("A", "Al", "+15555550101")])[1], [], at(2026, 11, 5))
+    assert [c.name for c in plan.sends] == ["Al"]

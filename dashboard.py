@@ -5,6 +5,11 @@ Routes (all under /dashboard):
   GET  /dashboard                      customers grouped by due month
   POST /dashboard/serviced             writes ONLY column H (Last Service Date) of one row
   POST /dashboard/push                 writes ONLY the row's Office List Month (next month)
+  POST /dashboard/cancel               writes ONLY Status=Cancelled + Cancelled On (columns added at the END)
+  POST /dashboard/reactivate           writes ONLY Status=Active + clears Cancelled On
+  POST /dashboard/undo                 reverts the row's most recent un-undone change from the Undo Log
+
+Every serviced/cancel/reactivate write first appends a row to the "Undo Log" tab.
 
 Never writes Next Due (I) or OK to Text? (K): both are sheet formulas. Sends no texts.
 
@@ -39,6 +44,12 @@ MAX_SKIP_COLS = {"Next Due", "OK to Text?"}  # formulas: never written
 
 H_COL = "Last Service Date"
 OLM_COL = "Office List Month"
+STATUS_COL = "Status"
+CANCELLED_ON_COL = "Cancelled On"
+UNDO_TAB = "Undo Log"
+UNDO_HEADERS = ["Timestamp CT", "Row", "Account", "Customer", "Old Last Service", "New Last Service", "Undone",
+                "Action", "Old Status", "New Status"]
+PROTECTED_LETTERS = ("I", "K")
 
 _fail = {}  # ip -> (count, first_ts)
 _fail_lock = threading.Lock()
@@ -183,14 +194,14 @@ def fetch_rows(force=False):
         valueRenderOption="UNFORMATTED_VALUE", dateTimeRenderOption="SERIAL_NUMBER",
     ).execute().get("values", [])
     if not vals:
-        return {"header": [], "rows": []}
+        return {"header": [], "rows": [], "undo": []}
     header = [str(h).strip() for h in vals[0]]
     rows = []
     for i, r in enumerate(vals[1:], start=2):
         d = {header[j]: (r[j] if j < len(r) else "") for j in range(len(header))}
         d["_row"] = i
         rows.append(d)
-    data = {"header": header, "rows": rows}
+    data = {"header": header, "rows": rows, "undo": read_undo_log(svc, m)}
     with _cache_lock:
         _cache.update(t=time.time(), rows=data)
     return data
@@ -244,6 +255,168 @@ def view_row(d, today: date):
     }
 
 
+# ------------------------------------------------------------------ status + undo helpers
+def is_cancelled(d) -> bool:
+    return str(d.get(STATUS_COL, "")).strip().lower() == "cancelled"
+
+
+def norm_date(v) -> str:
+    """Cell value -> ISO date string ('' if blank; raw text if not a date)."""
+    if v in (None, ""):
+        return ""
+    dt = serial_to_date(v)
+    return dt.isoformat() if dt else str(v).strip()
+
+
+def status_state(d) -> str:
+    """'' = Active, else 'Cancelled|<ISO date>'."""
+    if not is_cancelled(d):
+        return ""
+    return "Cancelled|" + norm_date(d.get(CANCELLED_ON_COL))
+
+
+def read_undo_log(svc, m):
+    try:
+        vals = svc.spreadsheets().values().get(
+            spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(UNDO_TAB)}!A:J",
+            valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+    except Exception:
+        return []  # tab not created yet
+    out = []
+    for i, r in enumerate(vals[1:], start=2):
+        r = [str(x) if x is not None else "" for x in r] + [""] * (len(UNDO_HEADERS) - len(r))
+        e_ = dict(zip(UNDO_HEADERS, r))
+        e_["_log_row"] = i
+        e_["Action"] = e_["Action"] or "serviced"
+        out.append(e_)
+    return out
+
+
+def current_value(d, action):
+    return norm_date(d.get(H_COL)) if action == "serviced" else status_state(d)
+
+
+def undo_candidate(data, row: int):
+    """Latest un-undone Undo Log entry for row, plus whether it can still be undone."""
+    d = next((x for x in data["rows"] if x["_row"] == row), None)
+    for e_ in reversed(data.get("undo") or []):
+        if str(e_["Row"]).strip() in (str(row), f"{row}.0") and not e_["Undone"].strip():
+            if d is None or str(d.get("Account", "")).strip() != e_["Account"].strip():
+                return e_, False
+            new = e_["New Last Service"] if e_["Action"] == "serviced" else e_["New Status"]
+            return e_, current_value(d, e_["Action"]) == new.strip()
+    return None, False
+
+
+def _ensure_undo_tab(svc, m):
+    meta = svc.spreadsheets().get(spreadsheetId=m.SHEET_ID, fields="sheets.properties.title").execute()
+    if UNDO_TAB not in {s["properties"]["title"] for s in meta.get("sheets", [])}:
+        svc.spreadsheets().batchUpdate(spreadsheetId=m.SHEET_ID, body={"requests": [
+            {"addSheet": {"properties": {"title": UNDO_TAB}}}]}).execute()
+        svc.spreadsheets().values().update(
+            spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(UNDO_TAB)}!A1",
+            valueInputOption="RAW", body={"values": [UNDO_HEADERS]}).execute()
+
+
+def append_undo(svc, m, row, d, action, old_h="", new_h="", old_s="", new_s=""):
+    _ensure_undo_tab(svc, m)
+    ts = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    svc.spreadsheets().values().append(
+        spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(UNDO_TAB)}!A:J", valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS", body={"values": [[
+            ts, row, str(d.get("Account", "")), str(_get(d, "Customer Name", "Name")),
+            old_h, new_h, "", action, old_s, new_s]]}).execute()
+
+
+def _safe_letter(m, header, idx, extra=()):
+    letter = m.col_letter(idx)
+    if header[idx] in MAX_SKIP_COLS or letter in PROTECTED_LETTERS + tuple(extra):
+        raise RuntimeError("refusing to write a formula column")
+    return letter
+
+
+def _ensure_status_cols(svc, m, data):
+    """Add Status / Cancelled On headers at the END of the Customers header row if missing."""
+    header = list(data["header"])
+    missing = [c for c in (STATUS_COL, CANCELLED_ON_COL) if c not in header]
+    if not missing:
+        return header
+    while header and not header[-1]:
+        header.pop()
+    start = len(header)
+    need = start + len(missing)
+    meta = svc.spreadsheets().get(spreadsheetId=m.SHEET_ID,
+                                  fields="sheets.properties(sheetId,title,gridProperties.columnCount)").execute()
+    p = next(s["properties"] for s in meta["sheets"] if s["properties"]["title"] == m.CUSTOMERS_TAB)
+    have = p.get("gridProperties", {}).get("columnCount", 26)
+    if have < need:
+        svc.spreadsheets().batchUpdate(spreadsheetId=m.SHEET_ID, body={"requests": [
+            {"appendDimension": {"sheetId": p["sheetId"], "dimension": "COLUMNS", "length": need - have}}]}).execute()
+    for c in missing:
+        if m.col_letter(len(header)) in PROTECTED_LETTERS:
+            raise RuntimeError("refusing to add a column there")
+        header.append(c)
+    svc.spreadsheets().values().update(
+        spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(m.CUSTOMERS_TAB)}!{m.col_letter(start)}1",
+        valueInputOption="RAW", body={"values": [missing]}).execute()
+    return header
+
+
+def _write_status(svc, m, header, row, state):
+    """state '' = Active (Status 'Active', Cancelled On blank) or 'Cancelled|ISO'."""
+    si, ci = _col_index(header, STATUS_COL), _col_index(header, CANCELLED_ON_COL)
+    sl, cl = _safe_letter(m, header, si, ("H",)), _safe_letter(m, header, ci, ("H",))
+    status, _, on = state.partition("|") if state else ("Active", "", "")
+    tab = m.quote_tab(m.CUSTOMERS_TAB)
+    svc.spreadsheets().values().batchUpdate(spreadsheetId=m.SHEET_ID, body={
+        "valueInputOption": "USER_ENTERED", "data": [
+            {"range": f"{tab}!{sl}{row}", "values": [[status]]},
+            {"range": f"{tab}!{cl}{row}", "values": [[on]]}]}).execute()
+
+
+def write_status(row: int, acct: str, cancel: bool, today: date):
+    m = _main()
+    svc = m.get_sheets()
+    data = fetch_rows(force=True)
+    d = _verify_row(data, row, acct)
+    if cancel == is_cancelled(d):
+        return False  # already in that state
+    header = _ensure_status_cols(svc, m, data)
+    old = status_state(d)
+    new = f"Cancelled|{today.isoformat()}" if cancel else ""
+    append_undo(svc, m, row, d, "cancel" if cancel else "reactivate", old_s=old, new_s=new)
+    _write_status(svc, m, header, row, new)
+    fetch_rows(force=True)
+    return True
+
+
+def undo_last(row: int, acct: str):
+    """Returns 'undone', 'changed' (cell no longer matches), or 'none'."""
+    m = _main()
+    svc = m.get_sheets()
+    data = fetch_rows(force=True)
+    d = _verify_row(data, row, acct)
+    e_, ok = undo_candidate(data, row)
+    if e_ is None:
+        return "none"
+    if not ok or e_["Account"].strip() != acct.strip():
+        return "changed"
+    tab = m.quote_tab(m.CUSTOMERS_TAB)
+    if e_["Action"] == "serviced":
+        letter = _safe_letter(m, data["header"], _col_index(data["header"], H_COL))
+        svc.spreadsheets().values().update(
+            spreadsheetId=m.SHEET_ID, range=f"{tab}!{letter}{row}", valueInputOption="USER_ENTERED",
+            body={"values": [[e_["Old Last Service"]]]}).execute()
+    else:
+        _write_status(svc, m, data["header"], row, e_["Old Status"].strip())
+    svc.spreadsheets().values().update(
+        spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(UNDO_TAB)}!G{e_['_log_row']}", valueInputOption="RAW",
+        body={"values": [[datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")]]}).execute()
+    fetch_rows(force=True)
+    _ = d
+    return "undone"
+
+
 # ------------------------------------------------------------------ writes
 def _col_index(header, name):
     try:
@@ -264,11 +437,12 @@ def _verify_row(data, row: int, acct: str):
 def write_last_service(row: int, acct: str, when: date):
     m = _main()
     data = fetch_rows(force=True)
-    _verify_row(data, row, acct)
+    d = _verify_row(data, row, acct)
     idx = _col_index(data["header"], H_COL)
     letter = m.col_letter(idx)
     if data["header"][idx] in MAX_SKIP_COLS or letter in ("I", "K"):
         raise RuntimeError("refusing to write a formula column")
+    append_undo(m.get_sheets(), m, row, d, "serviced", old_h=norm_date(d.get(H_COL)), new_h=when.isoformat())
     m.get_sheets().spreadsheets().values().update(
         spreadsheetId=m.SHEET_ID, range=f"{m.quote_tab(m.CUSTOMERS_TAB)}!{letter}{row}",
         valueInputOption="USER_ENTERED", body={"values": [[when.isoformat()]]}).execute()
@@ -393,6 +567,13 @@ def _fmt(d):
     return d.strftime("%b %-d, %Y") if d else "—"
 
 
+def _undo_form(v, csrf, label="Undo"):
+    hidden = (f"<input type=hidden name=csrf value='{e(csrf)}'><input type=hidden name=row value='{v['row']}'>"
+              f"<input type=hidden name=acct value='{e(v['acct'])}'>")
+    return (f"<form method=post action=\"/dashboard/undo\" onsubmit=\"return confirm('Undo the last change for "
+            f"{e(v['name'])}?')\">{hidden}<button class=\"btn sm ghost\" type=submit>{e(label)}</button></form>")
+
+
 def _card(v, csrf, today):
     tags = []
     if v["overdue"]:
@@ -415,6 +596,11 @@ def _card(v, csrf, today):
     hidden = (f"<input type=hidden name=csrf value='{e(csrf)}'><input type=hidden name=row value='{v['row']}'>"
               f"<input type=hidden name=acct value='{e(v['acct'])}'>")
     search = e(" ".join([v["name"], v["address"], v["city"], v["acct"], v["service"]]).lower())
+    extra = (f"<form method=post action=\"/dashboard/cancel\" onsubmit=\"return confirm('Cancel {e(v['name'])}? "
+             f"They move to the Cancelled list (nothing is deleted).')\">{hidden}"
+             f"<button class=\"btn sm ghost\" type=submit>Cancel</button></form>")
+    if v.get("undoable"):
+        extra += _undo_form(v, csrf)
     return f"""<div class="cust{' overdue' if v['overdue'] else ''}" data-s="{search}">
 <div class=top><div><div class=nm>{e(v['name'])}</div><div class=addr>{addr_html}</div></div>
 <div class=meta>Acct {e(v['acct'])}</div></div>
@@ -425,10 +611,24 @@ def _card(v, csrf, today):
 <input type=date name=when value="{today.isoformat()}" max="{today.isoformat()}" required aria-label="Service date">
 <button class="btn sm" type=submit>Mark as serviced</button></form>
 <form method=post action="/dashboard/push" onsubmit="return confirm('Push {e(v['name'])} to next month?')">{hidden}
-<button class="btn sm ghost" type=submit>Push to next month</button></form></div></div>"""
+<button class="btn sm ghost" type=submit>Push to next month</button></form>{extra}</div></div>"""
 
 
-def render_dashboard(views, csrf, today, flash="", show_hidden=False):
+def _cancelled_card(v, csrf):
+    hidden = (f"<input type=hidden name=csrf value='{e(csrf)}'><input type=hidden name=row value='{v['row']}'>"
+              f"<input type=hidden name=acct value='{e(v['acct'])}'>")
+    undo = _undo_form(v, csrf) if v.get("undoable") else ""
+    on = f" on {e(v['cancelled_on'])}" if v.get("cancelled_on") else ""
+    return f"""<div class=cust data-s="{e((v['name'] + ' ' + v['address'] + ' ' + v['acct']).lower())}">
+<div class=top><div><div class=nm>{e(v['name'])}</div><div class=addr>{e(v['address'])}</div></div>
+<div class=meta>Acct {e(v['acct'])}</div></div><div class=meta>Cancelled{on}</div>
+<div class=acts><form method=post action="/dashboard/reactivate" onsubmit="return confirm('Reactivate {e(v['name'])}?')">{hidden}
+<button class="btn sm" type=submit>Reactivate</button></form>{undo}</div></div>"""
+
+
+def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None):
+    cancelled = [v for v in views if v.get("cancelled")]
+    views = [v for v in views if not v.get("cancelled")]
     groups = {}
     for v in views:
         groups.setdefault(v["eff"], []).append(v)
@@ -450,7 +650,12 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False):
         cls = " class=od-h" if k and k < cur else ""
         parts.append(f"<details class=month{is_open}><summary><span{cls}>{e(label)}</span><span class=count>{len(lst)}</span></summary>"
                      + "".join(_card(v, csrf, today) for v in lst) + "</details>")
-    fl = f"<div class=ok role=status>{e(flash)}</div>" if flash else ""
+    if cancelled:
+        parts.append(f"<details class=month><summary><span>Cancelled</span><span class=count>{len(cancelled)}</span></summary>"
+                     + "".join(_cancelled_card(v, csrf) for v in sorted(cancelled, key=lambda v: v["name"].lower()))
+                     + "</details>")
+    fu = f" {_undo_form(flash_undo, csrf)}" if flash and flash_undo else ""
+    fl = f"<div class=ok role=status>{e(flash)}{fu}</div>" if flash else ""
     hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{THEME_TOGGLE}
 <form method=post action="/dashboard/logout"><input type=hidden name=csrf value="{e(csrf)}"><button type=submit>Sign out</button></form></header>"""
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
@@ -536,7 +741,7 @@ def logout(request: Request, csrf: str = Form("")):
 
 @router.get("/dashboard")
 @router.get("/dashboard/")
-def dashboard(request: Request, msg: str = "", test: int = 0):
+def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
     if not _password():
         return _disabled()
     s = _session(request)
@@ -549,11 +754,25 @@ def dashboard(request: Request, msg: str = "", test: int = 0):
         log.warning("dashboard read failed: %s", type(ex).__name__)
         return _headers(HTMLResponse(_page("Error", "<div class='card narrow'><h1>Can't reach the sheet</h1>"
                                            "<p>Try again in a minute.</p><a class=btn href='/dashboard'>Retry</a></div>"), 502))
-    views = [view_row(d, today) for d in data["rows"]
-             if (test and str(d.get("Account", "")).upper().startswith("TEST")) or not is_hidden_row(d)]
+    views = []
+    for d in data["rows"]:
+        if (test and str(d.get("Account", "")).upper().startswith("TEST")) or not is_hidden_row(d):
+            v = view_row(d, today)
+            v["cancelled"] = is_cancelled(d)
+            v["cancelled_on"] = norm_date(d.get(CANCELLED_ON_COL)) if v["cancelled"] else ""
+            v["undoable"] = undo_candidate(data, d["_row"])[1]
+            views.append(v)
     flash = {"serviced": "Saved. Last Service updated; Next Due recalculates in the sheet.",
-             "pushed": "Pushed to next month.", "err": "That didn't save. Refresh and try again."}.get(msg, "")
-    return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash)))
+             "pushed": "Pushed to next month.", "cancelled": "Cancelled. They're in the Cancelled list at the bottom.",
+             "reactivated": "Reactivated. They're back on the route list.",
+             "undone": "Undone. The previous value is back.",
+             "changed": "That was already changed since, so it can't be undone from here.",
+             "noundo": "Nothing to undo for that customer.",
+             "err": "That didn't save. Refresh and try again."}.get(msg, "")
+    fu = None
+    if msg in ("serviced", "cancelled", "reactivated") and row:
+        fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
+    return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu)))
 
 
 def _check_post(request: Request, csrf: str):
@@ -588,7 +807,7 @@ def serviced(request: Request, row: int = Form(...), acct: str = Form(...), when
     try:
         write_last_service(row, acct, d)
         log.info("dashboard: row %s (%s) Last Service -> %s", row, acct, d)
-        return RedirectResponse("/dashboard?msg=serviced", status_code=303)
+        return RedirectResponse(f"/dashboard?msg=serviced&row={row}", status_code=303)
     except Exception as ex:
         log.warning("dashboard serviced failed: %s", ex)
         return RedirectResponse("/dashboard?msg=err", status_code=303)
@@ -610,3 +829,45 @@ def push(request: Request, row: int = Form(...), acct: str = Form(...), csrf: st
     except Exception as ex:
         log.warning("dashboard push failed: %s", ex)
         return RedirectResponse("/dashboard?msg=err", status_code=303)
+
+
+def _simple_post(request, csrf, row, fn):
+    if not _password():
+        return _disabled()
+    _, bad = _check_post(request, csrf)
+    if bad:
+        return bad
+    if row < 2:
+        return Response("Bad row", status_code=400)
+    try:
+        return RedirectResponse(fn(), status_code=303)
+    except Exception as ex:
+        log.warning("dashboard write failed: %s", ex)
+        return RedirectResponse("/dashboard?msg=err", status_code=303)
+
+
+@router.post("/dashboard/cancel")
+def cancel(request: Request, row: int = Form(...), acct: str = Form(...), csrf: str = Form("")):
+    def go():
+        write_status(row, acct, True, datetime.now(TZ).date())
+        log.info("dashboard: row %s (%s) Status -> Cancelled", row, acct)
+        return f"/dashboard?msg=cancelled&row={row}"
+    return _simple_post(request, csrf, row, go)
+
+
+@router.post("/dashboard/reactivate")
+def reactivate(request: Request, row: int = Form(...), acct: str = Form(...), csrf: str = Form("")):
+    def go():
+        write_status(row, acct, False, datetime.now(TZ).date())
+        log.info("dashboard: row %s (%s) Status -> Active", row, acct)
+        return f"/dashboard?msg=reactivated&row={row}"
+    return _simple_post(request, csrf, row, go)
+
+
+@router.post("/dashboard/undo")
+def undo(request: Request, row: int = Form(...), acct: str = Form(...), csrf: str = Form("")):
+    def go():
+        r = undo_last(row, acct)
+        log.info("dashboard: row %s (%s) undo -> %s", row, acct, r)
+        return "/dashboard?msg=" + {"undone": "undone", "changed": "changed"}.get(r, "noundo")
+    return _simple_post(request, csrf, row, go)
