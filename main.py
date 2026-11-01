@@ -578,6 +578,12 @@ async def version():
             "signature_validation": bool(_auth_token())}
 
 
+# Dashboard v1 (login-gated; see dashboard.py)
+import dashboard  # noqa: E402
+
+app.include_router(dashboard.router)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
