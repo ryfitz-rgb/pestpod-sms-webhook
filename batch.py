@@ -19,7 +19,7 @@ Usage:
 
 Env vars:
   GOOGLE_SA_JSON_B64   service account key (same as the webhook)
-  SHEET_ID             optional; defaults to PestPod Reminders v1
+  SHEET_ID             required; the Google Sheet id (exits with an error if unset)
   TWILIO_ACCOUNT_SID   plus TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET, or TWILIO_AUTH_TOKEN
   TWILIO_MESSAGING_SERVICE_SID  optional; defaults to the PestPod Appointment Alerts service
   BATCH_MAX_SENDS      optional safety cap per run (default 200)
@@ -437,6 +437,8 @@ def main_cli(argv=None):
     p.add_argument("--only-phone", help="limit to one phone number")
     p.add_argument("--include-examples", action="store_true", help="dry-run only: include EXAMPLE DATA rows")
     a = p.parse_args(argv)
+    if not main.SHEET_ID:
+        p.error("SHEET_ID env var is not set (set the repo Actions variable SHEET_ID)")
     if a.now and not a.dry_run:
         p.error("--now is only allowed with --dry-run")
     now = datetime.fromisoformat(a.now).replace(tzinfo=TZ) if a.now else None

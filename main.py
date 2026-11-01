@@ -5,7 +5,7 @@ approved templates, and persists replies to the "PestPod Reminders v1" Google Sh
 Env vars:
   GOOGLE_SA_JSON_B64  base64 of a Google service account JSON key (spreadsheets scope).
                       If missing/invalid, the app falls back to TEST_PHONE-only matching.
-  SHEET_ID            optional, defaults to the PestPod Reminders v1 sheet.
+  SHEET_ID            required, the Google Sheet id (currently PestPod Reminders v2).
   TEST_PHONE          optional fallback match when Sheets is unavailable.
 """
 import base64
@@ -44,7 +44,10 @@ app = FastAPI(title="PestPod SMS Webhook", lifespan=lifespan)
 
 # Fallback test match; number comes from the TEST_PHONE env var (kept out of the repo).
 TEST_PHONE = os.environ.get("TEST_PHONE", "")
-SHEET_ID = os.environ.get("SHEET_ID") or "1k2DgUsGiEk6VaTG1lDD554o9BqvWWJ7pOg7I4IrW79M"
+# Required: the Google Sheet id (no hardcoded default; Render and the batch workflow set it).
+SHEET_ID = os.environ.get("SHEET_ID", "").strip()
+if not SHEET_ID:
+    logging.getLogger(__name__).error("SHEET_ID env var is not set; Google Sheets reads/writes will fail")
 CUSTOMERS_TAB = "Customers"
 INBOUND_TAB = "Inbound Log"
 INBOUND_HEADERS = ["Timestamp", "Phone", "Body", "MessageSid", "Matched Row"]
