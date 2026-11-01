@@ -91,3 +91,14 @@ Repo secrets: `GOOGLE_SA_JSON_B64`, `TWILIO_ACCOUNT_SID`, and either `TWILIO_API
 `TWILIO_API_KEY_SECRET` or `TWILIO_AUTH_TOKEN`.
 
 Note: GitHub disables scheduled workflows in public repos after 60 days with no commits.
+
+## Dashboard v1 (`dashboard.py`)
+Login-gated route view at `/dashboard` (same service). Customers grouped by due month: the `Next Due`
+month, or `Office List Month` when that is later (pushed stops). EX-/TEST rows hidden.
+- **Mark as serviced**: date picker (defaults to today, backdating allowed) writes ONLY `Last Service Date` (H).
+- **Push to next month**: writes ONLY `Office List Month` (next month). Never touches H, I or K.
+- Next Due (I) and OK to Text? (K) are formulas and are never written. No texts are sent from the dashboard.
+- Env: `DASHBOARD_PASSWORD` (required; dashboard returns 503 when unset), `DASHBOARD_USER` (default `ryan`),
+  `DASHBOARD_SECRET` (optional). Signed HttpOnly/Secure/SameSite=Lax session cookie (30 days), CSRF token on every POST,
+  login throttled after 10 failures per IP per 15 min. Changing the password signs everyone out.
+- Note: `batch.py` still nudges from `Next Due` only; it does not read `Office List Month` yet.
