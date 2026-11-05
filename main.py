@@ -37,6 +37,9 @@ async def lifespan(_app):
     # Warm the Sheets client + Customers cache without blocking startup, so the first
     # reply after a cold start usually skips the Sheets round-trip.
     threading.Thread(target=warm_cache, name="warm-customers", daemon=True).start()
+    # Side-by-side Postgres copy (Sheet stays main; read-only on the Sheet).
+    import pgsync
+    pgsync.start_nightly(get_sheets, SHEET_ID, quote_tab)
     yield
 
 
@@ -579,6 +582,60 @@ async def version():
     # Render sets RENDER_GIT_COMMIT on each deploy.
     return {"commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
             "signature_validation": bool(_auth_token())}
+
+
+@app.get("/api/v1/db/status")
+def db_status():
+    """Row counts only (no customer data)."""
+    import pgsync
+    if not pgsync.enabled():
+        return {"enabled": False}
+    try:
+        return {"enabled": True, **pgsync.status()}
+    except Exception as e:
+        return {"enabled": True, "error": type(e).__name__}
+
+
+OPTIN_ORIGINS = {"https://www.pestpod.ai", "https://pestpod.ai"}
+
+
+def _cors(request: Request, resp):
+    origin = request.headers.get("origin", "")
+    if origin in OPTIN_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+
+@app.options("/api/v1/optin")
+def optin_preflight(request: Request):
+    return _cors(request, PlainTextResponse(""))
+
+
+@app.post("/api/v1/optin")
+async def optin_signup(request: Request):
+    """Save a web opt-in (e.g. pestpod.ai/optin/blain) to Postgres. Sends no texts."""
+    from fastapi.responses import JSONResponse
+    import pgsync
+    ctype = request.headers.get("content-type", "")
+    data = dict(await request.json()) if "json" in ctype else dict(await request.form())
+    phone = normalize_phone(data.get("phone", ""))
+    consent = str(data.get("consent_text", "")).strip()
+    agreed = str(data.get("consent", "")).strip().lower() in ("1", "true", "yes", "on")
+    if not phone or not consent or not agreed:
+        return _cors(request, JSONResponse({"ok": False, "error": "phone, consent and consent_text required"}, 400))
+    if not pgsync.enabled():
+        return _cors(request, JSONResponse({"ok": False, "error": "storage unavailable"}, 503))
+    fwd = request.headers.get("x-forwarded-for", "")
+    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+    pgsync.save_optin(
+        str(data.get("name", "")).strip()[:200], phone, consent[:4000], ip[:64],
+        request.headers.get("user-agent", "")[:400],
+        str(data.get("tech", "")).strip().lower()[:40] or None,
+        str(data.get("page_url", request.headers.get("referer", ""))).strip()[:400],
+    )
+    return _cors(request, JSONResponse({"ok": True}))
 
 
 # Dashboard v1 (login-gated; see dashboard.py)
