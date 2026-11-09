@@ -90,7 +90,7 @@ def test_yes_word(svc):
 
 def test_no_reschedules(svc):
     t = post(" N ")
-    assert "Got it Sam, we'll reschedule" in t
+    assert "Got it Sam, we'll reach out to reschedule your appointment" in t
     assert {"range": "'Customers'!G3", "values": [["N"]]} in svc.writes
     assert {"range": "'Customers'!F3", "values": [["Reschedule N"]]} in svc.writes
 
@@ -321,7 +321,7 @@ def test_n_from_not_opted_in_customer_not_marked(full):
 
 def test_n_from_opted_in_customer_reschedules(full, monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "ROWS", OPTED_ROWS)
-    assert "Got it Sam, we'll reschedule" in post("n")
+    assert "Got it Sam, we'll reach out to reschedule your appointment" in post("n")
     assert {"range": "'Customers'!I2", "values": [["Reschedule N"]]} in full.writes
 
 
@@ -363,7 +363,7 @@ def call_direct(body, frm=PHONE, sid="SMbg"):
 @pytest.mark.parametrize("body,expect,row_writes", [
     ("Y", "text you a day and time soon",
      [{"range": "'Customers'!G3", "values": [["Y"]]}, {"range": "'Customers'!F3", "values": [["Confirmed Y"]]}]),
-    ("N", "Got it Sam, we'll reschedule",
+    ("N", "Got it Sam, we'll reach out to reschedule your appointment",
      [{"range": "'Customers'!G3", "values": [["N"]]}, {"range": "'Customers'!F3", "values": [["Reschedule N"]]}]),
 ])
 def test_reply_returned_before_writes_then_writes_run(svc, body, expect, row_writes):
