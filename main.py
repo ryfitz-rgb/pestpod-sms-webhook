@@ -459,7 +459,7 @@ def confirm_reply(name: str = "", appointment: str = "") -> str:
 
 def reschedule_reply(name: str) -> str:
     return (
-        f"PestPod: Got it {name}, we'll reschedule your pest control service. "
+        f"PestPod: Got it {name}, we'll reach out to reschedule your appointment. "
         "Reply HELP for help, STOP to opt out."
     )
 
