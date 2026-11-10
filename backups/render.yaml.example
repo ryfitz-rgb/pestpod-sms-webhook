@@ -1,0 +1,40 @@
+# PLANNED Render settings for the nightly backup cron job. NOT a live Blueprint:
+# it is named .example on purpose so nothing syncs automatically.
+# Create the service only after Clyde approves.
+services:
+  - type: cron
+    name: pestpod-db-backup
+    runtime: docker
+    region: oregon                 # same region as pestpod-db, required for the internal URL
+    plan: starter                  # 0.5 CPU / 512 MB, $0.00016/min, $1/month minimum
+    schedule: "5 8,9 * * *"        # UTC; script runs only when it's 3 AM America/Chicago
+    repo: https://github.com/ryfitz-rgb/pestpod-sms-webhook
+    branch: main
+    dockerfilePath: ./backups/Dockerfile
+    dockerContext: ./backups
+    buildFilter:
+      paths:
+        - backups/**
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pestpod-db
+          property: connectionString   # internal connection string
+      - key: DROPBOX_BACKUP_APP_KEY
+        sync: false                    # set by hand in the dashboard (secret)
+      - key: DROPBOX_BACKUP_APP_SECRET
+        sync: false
+      - key: DROPBOX_BACKUP_REFRESH_TOKEN
+        sync: false
+      - key: BACKUP_SOURCE
+        value: pg_dump
+      - key: RETENTION_DAYS
+        value: "60"
+      - key: MIN_KEEP_BACKUPS
+        value: "7"
+      - key: REQUIRED_NONEMPTY_TABLES
+        value: customers,optin_signups
+      - key: ALERT_EMAIL_TO
+        value: bigwheat@pm.me
+      # Optional custom alert email: only if an existing free SMTP sender is approved.
+      # - key: ALERT_SMTP_HOST / ALERT_SMTP_PORT / ALERT_SMTP_USER / ALERT_SMTP_PASSWORD / ALERT_SMTP_FROM
