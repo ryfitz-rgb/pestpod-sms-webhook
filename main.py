@@ -628,29 +628,48 @@ def optin_preflight(request: Request):
     return _cors(request, PlainTextResponse(""))
 
 
+CONSENT_TRUE = ("1", "true", "yes", "on", "y", "checked")
+
+
+def consent_given(value) -> bool:
+    """The SMS consent checkbox state. Only an explicit tick counts; missing, blank,
+    'false', 'off', '0' or anything else is no consent."""
+    if isinstance(value, bool):
+        return value
+    return str(value if value is not None else "").strip().lower() in CONSENT_TRUE
+
+
 @app.post("/api/v1/optin")
 async def optin_signup(request: Request):
-    """Save a web opt-in (e.g. pestpod.ai/optin/blain) to Postgres. Sends no texts."""
+    """Save a web form submission (e.g. pestpod.ai/optin/blain) to Postgres. Sends no texts.
+
+    The SMS consent box is optional (carrier rule). Ticked: saved with sms_consent=true,
+    exactly as before. Unticked or missing: saved as a contact with sms_consent=false; it is
+    never marked Opted in / OK to text and never gets any SMS. Never touches the sheet."""
     from fastapi.responses import JSONResponse
     import pgsync
     ctype = request.headers.get("content-type", "")
-    data = dict(await request.json()) if "json" in ctype else dict(await request.form())
+    try:
+        data = dict(await request.json()) if "json" in ctype else dict(await request.form())
+    except Exception:
+        return _cors(request, JSONResponse({"ok": False, "error": "bad request"}, 400))
     phone = normalize_phone(data.get("phone", ""))
-    consent = str(data.get("consent_text", "")).strip()
-    agreed = str(data.get("consent", "")).strip().lower() in ("1", "true", "yes", "on")
-    if not phone or not consent or not agreed:
-        return _cors(request, JSONResponse({"ok": False, "error": "phone, consent and consent_text required"}, 400))
+    consent_text = str(data.get("consent_text", "") or "").strip()
+    agreed = consent_given(data.get("consent"))
+    if not phone or (agreed and not consent_text):
+        return _cors(request, JSONResponse({"ok": False, "error": "phone required (and consent_text when consent is given)"}, 400))
     if not pgsync.enabled():
         return _cors(request, JSONResponse({"ok": False, "error": "storage unavailable"}, 503))
     fwd = request.headers.get("x-forwarded-for", "")
     ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
     pgsync.save_optin(
-        str(data.get("name", "")).strip()[:200], phone, consent[:4000], ip[:64],
+        str(data.get("name", "")).strip()[:200], phone, consent_text[:4000], ip[:64],
         request.headers.get("user-agent", "")[:400],
         str(data.get("tech", "")).strip().lower()[:40] or None,
         str(data.get("page_url", request.headers.get("referer", ""))).strip()[:400],
+        sms_consent=agreed,
     )
-    return _cors(request, JSONResponse({"ok": True}))
+    return _cors(request, JSONResponse({"ok": True, "sms_consent": agreed}))
 
 
 # Dashboard v1 (login-gated; see dashboard.py)

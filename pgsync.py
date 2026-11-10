@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS optin_signups (
   page_url      TEXT
 );
 CREATE INDEX IF NOT EXISTS optin_signups_phone_idx ON optin_signups (phone);
+-- sms_consent: was the SMS consent box ticked? Rows saved before this column existed all
+-- required the box, so they backfill to true; new rows default to false (no consent) and
+-- the endpoint always writes the value explicitly.
+ALTER TABLE optin_signups ADD COLUMN IF NOT EXISTS sms_consent BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE optin_signups ALTER COLUMN sms_consent SET DEFAULT false;
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          BIGSERIAL PRIMARY KEY,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -173,14 +178,16 @@ def sync_once(svc, sheet_id, quote_tab) -> dict:
     return counts
 
 
-def save_optin(name, phone, consent_text, ip, user_agent, tech, page_url) -> int:
+def save_optin(name, phone, consent_text, ip, user_agent, tech, page_url, sms_consent=False) -> int:
+    """Store a web form submission. sms_consent=False rows are contacts only: nothing here
+    (or anywhere else) marks them Opted in / OK to text or sends them a text."""
     with connect() as conn:
         ensure_schema(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO optin_signups (name, phone, consent_text, ip, user_agent, tech, page_url) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (name, phone, consent_text, ip, user_agent, tech, page_url),
+                "INSERT INTO optin_signups (name, phone, consent_text, ip, user_agent, tech, page_url, sms_consent) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (name, phone, consent_text, ip, user_agent, tech, page_url, bool(sms_consent)),
             )
             new_id = cur.fetchone()[0]
         conn.commit()
@@ -193,11 +200,12 @@ def status() -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT source_tab, count(*) FROM customers GROUP BY 1 ORDER BY 1")
             by_tab = {t: n for t, n in cur.fetchall()}
-            cur.execute("SELECT count(*) FROM optin_signups")
-            optins = cur.fetchone()[0]
+            cur.execute("SELECT count(*), count(*) FILTER (WHERE NOT sms_consent) FROM optin_signups")
+            optins, no_consent = cur.fetchone()
             cur.execute("SELECT finished_at, ok, counts FROM sync_runs ORDER BY id DESC LIMIT 1")
             last = cur.fetchone()
     return {"customers_by_tab": by_tab, "optin_signups": optins,
+            "optin_signups_no_sms_consent": no_consent,
             "last_sync": {"finished_at": last[0].isoformat() if last and last[0] else None,
                           "ok": last[1] if last else None} if last else None}
 
