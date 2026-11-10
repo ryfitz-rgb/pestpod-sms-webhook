@@ -7,6 +7,9 @@ Env vars:
                       If missing/invalid, the app falls back to TEST_PHONE-only matching.
   SHEET_ID            required, the Google Sheet id (currently PestPod Reminders v2).
   TEST_PHONE          optional fallback match when Sheets is unavailable.
+  CUSTOMER_STORE      "sheet" (default) or "postgres". With "postgres", every Sheets call
+                      (webhook, batch.py, dashboard) is served from pestpod-db by gridstore.py
+                      instead of Google; flipping back to "sheet" is the rollback.
 """
 import base64
 import json
@@ -86,7 +89,16 @@ _service_failed = False
 
 
 def get_sheets():
-    """Return a Sheets API service, or None if creds are missing/invalid. Never raises."""
+    """The customer store: the Google Sheet (default) or its Postgres copy
+    (CUSTOMER_STORE=postgres, same API). None if unavailable. Never raises."""
+    import gridstore
+    if gridstore.use_postgres():
+        return gridstore.service()
+    return get_real_sheets()
+
+
+def get_real_sheets():
+    """Return a Google Sheets API service, or None if creds are missing/invalid. Never raises."""
     global _service, _service_failed
     if _service is not None or _service_failed:
         return _service
@@ -350,6 +362,7 @@ def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched
 
 
 # ---------------------------------------------------------------- text-to-join
+FORMULA_LETTERS = ("I", "K")  # Customers ARRAYFORMULA columns: Next Due, OK to Text?
 JOIN_KEYWORDS = {"JOIN", "REMIND"}
 JOIN_METHOD = "Keyword JOIN"  # must be in the Opt-In Method dropdown on the Customers tab
 # Y/YES is a confirm from an opted-in customer, and a text-to-join from anyone else
@@ -385,7 +398,9 @@ def mark_customer_opted_in(row, today=None) -> bool:
     data = []
     for header, value in wanted:
         j = _find_col(cols, header)
-        if j is not None:
+        # Never write Next Due (I) or OK to Text? (K): they are ARRAYFORMULA columns, and a
+        # typed value there breaks the formula for the whole column. K follows Opt-In Status.
+        if j is not None and col_letter(j) not in FORMULA_LETTERS:
             data.append({"range": f"{quote_tab(CUSTOMERS_TAB)}!{col_letter(j)}{row}", "values": [[value]]})
     if not data:
         return False
