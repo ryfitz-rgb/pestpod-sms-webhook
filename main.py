@@ -587,6 +587,14 @@ def sms_webhook(
     return PlainTextResponse(str(resp), media_type="application/xml")
 
 
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+async def root():
+    """https://app.pestpod.ai/ (and the onrender.com root) -> the dashboard, which sends
+    signed-out visitors on to /dashboard/login. Only the bare root path; nothing else moves."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/dashboard", status_code=302)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
