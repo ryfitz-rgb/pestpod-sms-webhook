@@ -206,3 +206,78 @@ def test_json_throttles_bad_basic(faked):
     ok = {"authorization": "Basic " + base64.b64encode(f"ryan:{PW}".encode()).decode()}
     assert c.get("/api/v1/optin/unmatched", headers=ok).status_code == 401   # locked out for 15 min
     dashboard._fail.clear()
+
+
+# ---------------------------------------------------------------- session cookie on the /api path (PR #9 follow-up)
+def _cookie_paths(c):
+    return sorted(ck.path for ck in c.cookies.jar if ck.name == dashboard.COOKIE)
+
+
+def test_real_login_session_reaches_api_endpoint(faked):
+    c = _client_logged_in()          # real login flow, cookies exactly as the dashboard sets them
+    assert _cookie_paths(c) == ["/api/v1/optin/unmatched", "/dashboard"]
+    r = c.get("/api/v1/optin/unmatched", headers={"accept": "text/html", "sec-fetch-mode": "navigate"})
+    assert r.status_code == 200 and r.json()["total"] == 2 and "5045559999" not in r.text
+
+
+def test_old_session_picks_up_api_cookie_on_dashboard_visit(faked):
+    c = _client_logged_in()
+    # simulate a session from before the fix: only the /dashboard cookie
+    tok = next(ck.value for ck in c.cookies.jar if ck.name == dashboard.COOKIE and ck.path == "/dashboard")
+    c.cookies.clear()
+    c.cookies.set(dashboard.COOKIE, tok, domain="testserver.local", path="/dashboard")
+    assert c.get("/api/v1/optin/unmatched").status_code == 401
+    assert c.get("/dashboard").status_code == 200
+    assert "/api/v1/optin/unmatched" in _cookie_paths(c)
+    assert c.get("/api/v1/optin/unmatched").status_code == 200
+
+
+def test_session_cookie_scoped_to_this_endpoint_only(faked):
+    c = _client_logged_in()
+    assert all(p in ("/dashboard", "/api/v1/optin/unmatched") for p in _cookie_paths(c))
+    sent = []
+
+    @main.app.get("/api/v1/optin/_probe_cookie_test")
+    def _probe(request: main.Request):
+        sent.append(request.cookies.get(dashboard.COOKIE))
+        return {}
+    try:
+        c.get("/api/v1/optin/_probe_cookie_test")
+        c.get("/api/v1/db/status")
+    finally:
+        main.app.router.routes.pop()
+    assert sent == [None]
+
+
+def test_no_auth_browser_gets_plain_401_script_gets_challenge(faked):
+    c = TestClient(main.app)
+    r = c.get("/api/v1/optin/unmatched", headers={"accept": "text/html,application/json", "sec-fetch-mode": "navigate"})
+    assert r.status_code == 401 and "www-authenticate" not in r.headers
+    r = c.get("/api/v1/optin/unmatched", headers={"accept": "application/json"})
+    assert r.status_code == 401 and r.headers["www-authenticate"] == 'Basic realm="PestPod"'
+
+
+def test_forged_or_expired_cookie_on_api_path_is_401(faked):
+    c = TestClient(main.app)
+    c.cookies.set(dashboard.COOKIE, "eHx5fHo.deadbeef", domain="testserver.local", path="/api/v1/optin/unmatched")
+    assert c.get("/api/v1/optin/unmatched").status_code == 401
+    old = dashboard.make_session("ryan", now=1)      # expired long ago
+    c.cookies.clear()
+    c.cookies.set(dashboard.COOKIE, old, domain="testserver.local", path="/api/v1/optin/unmatched")
+    assert c.get("/api/v1/optin/unmatched").status_code == 401
+
+
+def test_logout_clears_api_cookie(faked):
+    c = _client_logged_in()
+    page = c.get("/dashboard").text
+    csrf = re.search(r"name=csrf value=\"([^\"]+)\"", page).group(1)
+    c.post("/dashboard/logout", data={"csrf": csrf}, follow_redirects=False)
+    assert _cookie_paths(c) == []
+    assert c.get("/api/v1/optin/unmatched").status_code == 401
+
+
+def test_wrong_basic_with_session_still_ok_and_lockout_kept(faked):
+    dashboard._fail.clear()
+    ok = {"authorization": "Basic " + base64.b64encode(f"ryan:{PW}".encode()).decode()}
+    assert TestClient(main.app).get("/api/v1/optin/unmatched", headers=ok).status_code == 200
+    test_json_throttles_bad_basic(None)

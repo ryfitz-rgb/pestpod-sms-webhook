@@ -42,6 +42,10 @@ router = APIRouter()
 TZ = ZoneInfo("America/Chicago")
 COOKIE = "pp_session"
 LOGIN_CSRF_COOKIE = "pp_login_csrf"
+# The session cookie is scoped to /dashboard, so browsers never send it to /api/... . A copy of the
+# SAME signed token is also scoped to exactly this one read-only endpoint, so a logged-in browser can
+# open it. No other /api route ever sees the session.
+API_SESSION_PATH = "/api/v1/optin/unmatched"
 SESSION_TTL = 30 * 24 * 3600
 MAX_SKIP_COLS = {"Next Due", "OK to Text?"}  # formulas: never written
 
@@ -853,9 +857,9 @@ def _session(request: Request):
     return read_session(request.cookies.get(COOKIE))
 
 
-def _set_cookie(resp, request, name, value, max_age):
+def _set_cookie(resp, request, name, value, max_age, path="/dashboard"):
     resp.set_cookie(name, value, max_age=max_age, httponly=True, secure=_secure(request),
-                    samesite="lax", path="/dashboard")
+                    samesite="lax", path=path)
 
 
 @router.get("/dashboard/static/{name}")
@@ -904,7 +908,9 @@ def login(request: Request, username: str = Form(""), password: str = Form(""), 
         log.warning("dashboard login failed from %s", ip)
         return fail("Wrong username or password.")
     resp = RedirectResponse("/dashboard", status_code=303)
-    _set_cookie(resp, request, COOKIE, make_session(_user()), SESSION_TTL)
+    tok = make_session(_user())
+    _set_cookie(resp, request, COOKIE, tok, SESSION_TTL)
+    _set_cookie(resp, request, COOKIE, tok, SESSION_TTL, path=API_SESSION_PATH)
     resp.delete_cookie(LOGIN_CSRF_COOKIE, path="/dashboard")
     log.info("dashboard login ok from %s", ip)
     return _headers(resp)
@@ -916,6 +922,7 @@ def logout(request: Request, csrf: str = Form("")):
     resp = RedirectResponse("/dashboard/login", status_code=303)
     if s and hmac.compare_digest(csrf, csrf_for(s)):
         resp.delete_cookie(COOKIE, path="/dashboard")
+        resp.delete_cookie(COOKIE, path=API_SESSION_PATH)
     return resp
 
 
@@ -955,8 +962,11 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
     fu = None
     if msg in ("serviced", "cancelled", "reactivated", "edited") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
-    return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
+    resp = _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
                                                   signups=load_unmatched(data["rows"]))))
+    # Sessions from before this cookie existed pick up the endpoint-scoped copy on the next visit.
+    _set_cookie(resp, request, COOKIE, request.cookies.get(COOKIE), SESSION_TTL, path=API_SESSION_PATH)
+    return resp
 
 
 def _basic_ok(request: Request) -> bool:
@@ -980,14 +990,21 @@ def _basic_ok(request: Request) -> bool:
     return ok
 
 
+def _from_browser(request: Request) -> bool:
+    h = request.headers
+    return bool(h.get("sec-fetch-mode") or h.get("sec-fetch-dest") or "text/html" in h.get("accept", ""))
+
+
 def _unmatched_json(request: Request, allow_basic: bool):
     from fastapi.responses import JSONResponse
     import unmatched
     if not _password():
         return _headers(JSONResponse({"error": "not configured"}, 503))
     if not (_session(request) or (allow_basic and _basic_ok(request))):
-        resp = JSONResponse({"error": "unauthorized"}, 401)
-        if allow_basic:
+        resp = JSONResponse({"error": "unauthorized",
+                             "hint": "Sign in at /dashboard first, or use HTTP Basic."}, 401)
+        # Challenge scripts only. A browser gets a plain 401 (no username/password pop-up).
+        if allow_basic and not _from_browser(request):
             resp.headers["WWW-Authenticate"] = 'Basic realm="PestPod"'
         return _headers(resp)
     try:
