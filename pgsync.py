@@ -194,6 +194,26 @@ def save_optin(name, phone, consent_text, ip, user_agent, tech, page_url, sms_co
     return new_id
 
 
+def list_optins() -> list:
+    """All web sign-ups, oldest first (read-only; for the unmatched sign-ups report)."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, created_at, name, phone, sms_consent, tech, page_url "
+                        "FROM optin_signups ORDER BY created_at, id")
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def review_rows() -> list:
+    """Import Review rows from the side copy (hint only for the unmatched report; read-only)."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT source_tab, sheet_row, name, phone FROM customers "
+                        "WHERE source_tab <> 'Customers' ORDER BY source_tab, sheet_row")
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 def status() -> dict:
     with connect() as conn:
         ensure_schema(conn)

@@ -8,6 +8,9 @@ Routes (all under /dashboard):
   POST /dashboard/cancel               writes ONLY Status=Cancelled + Cancelled On (columns added at the END)
   POST /dashboard/reactivate           writes ONLY Status=Active + clears Cancelled On
   POST /dashboard/undo                 reverts the row's most recent un-undone change from the Undo Log
+  GET  /dashboard/unmatched.json       unmatched web sign-ups (read-only, session cookie)
+  GET  /api/v1/optin/unmatched         same list for an automated reader (session cookie or HTTP Basic
+                                       with the existing DASHBOARD_USER / DASHBOARD_PASSWORD; no new secret)
 
 Every serviced/cancel/reactivate write first appends a row to the "Undo Log" tab.
 
@@ -538,6 +541,91 @@ def write_push(row: int, acct: str, today: date):
     return target
 
 
+# ------------------------------------------------------------------ unmatched web sign-ups (read-only)
+_unm_cache = {"t": 0, "val": None}
+
+
+def load_unmatched(customer_rows, force=False):
+    """(entries, error) for the Unmatched sign-ups section. Reads optin_signups (and the Import
+    Review side copy, hint only) from Postgres; compares against the Customers rows the dashboard
+    already read. Never writes anything. Never raises."""
+    import pgsync
+    import unmatched
+    if not pgsync.enabled():
+        return [], "Sign-up storage isn't configured."
+    with _cache_lock:
+        if not force and _unm_cache["val"] is not None and time.time() - _unm_cache["t"] < 30:
+            signups, review = _unm_cache["val"]
+        else:
+            signups = review = None
+    try:
+        if signups is None:
+            signups = pgsync.list_optins()
+            try:
+                review = pgsync.review_rows()
+            except Exception as ex:
+                log.warning("import review hint read failed: %s", type(ex).__name__)
+                review = []
+            with _cache_lock:
+                _unm_cache.update(t=time.time(), val=(signups, review))
+        return unmatched.find_unmatched(signups, customer_rows, review), ""
+    except Exception as ex:
+        log.warning("unmatched sign-ups read failed: %s", type(ex).__name__)
+        return [], "Couldn't read web sign-ups right now."
+
+
+def _signup_card(x):
+    import unmatched
+    tags = []
+    for r in x["reasons"]:
+        cls = "amb" if r == unmatched.REASON_NO_CONSENT else "red"
+        label = {"no consent": "No consent · contact only"}.get(r, r.capitalize())
+        tags.append(f"<span class='tag {cls}'>{e(label)}</span>")
+    tags.append(f"<span class='tag {'grn' if x['consent'] else ''}'>Consent: {'yes' if x['consent'] else 'no'}</span>")
+    if x["page"]:
+        tags.append(f"<span class='tag blu'>{e(x['page'])}</span>")
+    if x["submissions"] > 1:
+        tags.append(f"<span class=tag>{x['submissions']} submissions</span>")
+    hints = []
+    for m in x["matched_rows"]:
+        hints.append(f"Phone is on Customers row {e(m['row'])}: Acct {e(m['account'] or '—')} · {e(m['name'])}"
+                     f" (Opt-In Status: {e(m['opt_in_status'] or 'blank')})")
+    for m in x["likely_match"]:
+        hints.append(f"Likely match: Acct {e(m['account'] or '—')} · {e(m['name'])} (row {e(m['row'])})")
+    for m in x["import_review_hint"]:
+        hints.append(f"Phone is on {e(m['tab'])} row {e(m['row'])} · {e(m['name'])} (review tab, not a customer match)")
+    if not x["matched_rows"] and not x["likely_match"] and not x["import_review_hint"]:
+        hints.append("No likely match on the Customers tab.")
+    hint = "".join(f"<div class=hint>{h}</div>" for h in hints)
+    fyi = "" if x["actionable"] else " fyi"
+    return f"""<div class="cust signup{fyi}" data-s="{e((x['name'] + ' ' + x['phone_last4']).lower())}">
+<div class=top><div><div class=nm>{e(x['name'] or '(no name)')}</div><div class=addr>Phone ending {e(x['phone_last4'] or '—')}</div></div>
+<div class=meta>{e(x['submitted_label'])}</div></div>
+<div class=tags>{''.join(tags)}</div>{hint}</div>"""
+
+
+def render_unmatched(entries, err=""):
+    """The 'Unmatched sign-ups' section. Read-only: fix each one in the Sheet by hand."""
+    act = [x for x in entries if x["actionable"]]
+    fyi = [x for x in entries if not x["actionable"]]
+    if err:
+        inner = f"<div class=meta>{e(err)}</div>"
+    elif not entries:
+        inner = "<div class=meta>All web sign-ups match a marked Customers row.</div>"
+    else:
+        inner = "".join(_signup_card(x) for x in act)
+        if fyi:
+            inner += ("<div class=meta style='margin-top:10px'><b>Contact only (no SMS consent):</b> never mark these "
+                      "Opted in or text them.</div>" + "".join(_signup_card(x) for x in fyi))
+    is_open = " open" if act or err else ""
+    badge = f"<span class=badge>{len(act)}</span>" if act else ""
+    extra = f"<span class=count>{len(fyi)} contact only</span>" if fyi else ""
+    return (f"<details class='month unm'{is_open} id=unmatched><summary><span>Unmatched sign-ups</span>{badge}{extra}</summary>"
+            f"<div class=meta>Web opt-ins whose phone isn't on the Customers tab, or whose row isn't marked "
+            f"(Opt-In Status / Method / Date). Nothing here changes the Sheet: confirm each match and fix it by hand.</div>"
+            f"{inner}</details>")
+
+
 # ------------------------------------------------------------------ HTML
 CSS = """
 :root{--g:#1f5132;--g2:#2e7d4f;--lg:#eaf4ec;--red:#c8332b;--ink:#1d2a22;--mut:#5f6f65;--bd:#d9e4dc}
@@ -585,6 +673,10 @@ html[data-theme=dark] .btn.ghost{color:#8fd3a8}html[data-theme=dark] .cust.overd
 html[data-theme=dark] .tag{background:#24302a;color:#c9d6ce}html[data-theme=dark] .tag.red,html[data-theme=dark] .err{background:#3b1d1b;color:#f3b4ae}
 html[data-theme=dark] .tag.grn,html[data-theme=dark] .ok,html[data-theme=dark] .count{color:#8fd3a8}html[data-theme=dark] .tag.amb{background:#3a2e12;color:#f0cf8a}
 html[data-theme=dark] .tag.blu{background:#16263a;color:#9cc3ef}html[data-theme=dark] .pref b{color:#8fd3a8}html[data-theme=dark] .od-h{color:#f08a82}
+.badge{display:inline-block;min-width:20px;text-align:center;background:var(--red);color:#fff;border-radius:20px;padding:1px 7px;font-size:12px;font-weight:700;text-decoration:none}
+a.badge{margin-left:6px}.cust.signup{border-left-color:#d08a1e}.cust.signup.fyi{border-left-color:#7a8a80}
+details.month.unm>summary{border-bottom-color:#d08a1e}.unm .hint{font-size:13px;color:var(--mut);margin-top:4px}
+html[data-theme=dark] .badge{background:#b8352d;color:#fff}
 @media(max-width:560px){.top{flex-direction:column}.acts{flex-direction:column;align-items:stretch}.acts form{width:100%}.acts form .btn{flex:1}.acts input[type=date]{flex:1}}
 """
 
@@ -706,7 +798,7 @@ def _cancelled_card(v, csrf):
 <button class="btn sm" type=submit>Reactivate</button></form>{undo}</div></div>"""
 
 
-def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None):
+def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None, signups=None):
     cancelled = [v for v in views if v.get("cancelled")]
     views = [v for v in views if not v.get("cancelled")]
     groups = {}
@@ -734,14 +826,22 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
         parts.append(f"<details class=month><summary><span>Cancelled</span><span class=count>{len(cancelled)}</span></summary>"
                      + "".join(_cancelled_card(v, csrf) for v in sorted(cancelled, key=lambda v: v["name"].lower()))
                      + "</details>")
+    unm_html, hbadge = "", ""
+    if signups is not None:
+        entries, unm_err = signups
+        n_act = sum(1 for x in entries if x["actionable"])
+        unm_html = render_unmatched(entries, unm_err)
+        if n_act:
+            hbadge = (f"<a class=badge href='#unmatched' title='Unmatched sign-ups' "
+                      f"aria-label='{n_act} unmatched sign-ups'>{n_act}</a>")
     fu = f" {_undo_form(flash_undo, csrf)}" if flash and flash_undo else ""
     fl = f"<div class=ok role=status>{e(flash)}{fu}</div>" if flash else ""
-    hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{THEME_TOGGLE}
+    hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{hbadge}{THEME_TOGGLE}
 <form method=post action="/dashboard/logout"><input type=hidden name=csrf value="{e(csrf)}"><button type=submit>Sign out</button></form></header>"""
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
 <a class="btn sm ghost" href="/dashboard">Refresh</a></div>
 <div class=sum>{len(views)} customers · {od} overdue · updated {datetime.now(TZ).strftime('%b %-d, %-I:%M %p')} CT</div>
-{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
+{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
 <script>document.getElementById('q').addEventListener('input',function(){{var q=this.value.toLowerCase().trim();
 document.querySelectorAll('.cust').forEach(function(c){{c.style.display=!q||c.dataset.s.indexOf(q)>=0?'':'none'}});
 if(q)document.querySelectorAll('details.month').forEach(function(d){{d.open=true}});}});</script>"""
@@ -855,7 +955,62 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
     fu = None
     if msg in ("serviced", "cancelled", "reactivated", "edited") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
-    return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu)))
+    return _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
+                                                  signups=load_unmatched(data["rows"]))))
+
+
+def _basic_ok(request: Request) -> bool:
+    """HTTP Basic with the existing dashboard username/password (for an automated reader).
+    Shares the login throttle. No new secret or env var."""
+    h = request.headers.get("authorization", "")
+    if not h.lower().startswith("basic "):
+        return False
+    ip = _client_ip(request)
+    if _throttled(ip):
+        return False
+    try:
+        user, _, pw = base64.b64decode(h[6:].strip()).decode("utf-8").partition(":")
+    except Exception:
+        user, pw = "", ""
+    ok = (hmac.compare_digest(user.encode(), _user().encode())
+          and hmac.compare_digest(pw.encode(), _password().encode()))
+    if not ok:
+        _record_fail(ip)
+        log.warning("unmatched api auth failed from %s", ip)
+    return ok
+
+
+def _unmatched_json(request: Request, allow_basic: bool):
+    from fastapi.responses import JSONResponse
+    import unmatched
+    if not _password():
+        return _headers(JSONResponse({"error": "not configured"}, 503))
+    if not (_session(request) or (allow_basic and _basic_ok(request))):
+        resp = JSONResponse({"error": "unauthorized"}, 401)
+        if allow_basic:
+            resp.headers["WWW-Authenticate"] = 'Basic realm="PestPod"'
+        return _headers(resp)
+    try:
+        rows = fetch_rows()["rows"]
+    except Exception as ex:
+        log.warning("unmatched api sheet read failed: %s", type(ex).__name__)
+        return _headers(JSONResponse({"error": "customers unavailable"}, 502))
+    entries, err = load_unmatched(rows)
+    body = {"generated_ct": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), **unmatched.summary(entries),
+            "entries": entries}
+    if err:
+        body["error"] = err
+    return _headers(JSONResponse(body, 502 if err and not entries else 200))
+
+
+@router.get("/dashboard/unmatched.json")
+def unmatched_json(request: Request):
+    return _unmatched_json(request, allow_basic=False)
+
+
+@router.get("/api/v1/optin/unmatched")
+def unmatched_api(request: Request):
+    return _unmatched_json(request, allow_basic=True)
 
 
 def _check_post(request: Request, csrf: str):
