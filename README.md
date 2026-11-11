@@ -102,3 +102,16 @@ month, or `Office List Month` when that is later (pushed stops). EX-/TEST rows h
   `DASHBOARD_SECRET` (optional). Signed HttpOnly/Secure/SameSite=Lax session cookie (30 days), CSRF token on every POST,
   login throttled after 10 failures per IP per 15 min. Changing the password signs everyone out.
 - Note: `batch.py` still nudges from `Next Due` only; it does not read `Office List Month` yet.
+
+### Unmatched sign-ups (`unmatched.py`, read-only)
+Section + red badge on `/dashboard` listing web opt-ins (`optin_signups`) that need a hand fix:
+**no phone match** on the Customers tab, **matched but not marked** (Opt-In Status/Method/Date, L/M/N, not
+all filled with "Opted in"), plus **no consent** (contact only; listed separately, not in the badge).
+Shows name, last 4 of phone, submitted time (CT), consent, tech/page path, and a likely Customers match by
+name (account + name). Import Review rows never count as a match; a phone hit there is shown as a hint.
+Phones are compared on their last 10 digits (+1 and punctuation ignored). Nothing is written anywhere.
+- `GET /dashboard/unmatched.json`: same list, dashboard session cookie.
+- `GET /api/v1/optin/unmatched`: same list for an automated reader; dashboard session or HTTP Basic with the
+  existing `DASHBOARD_USER`/`DASHBOARD_PASSWORD` (shares the login throttle). No new env var.
+  JSON: `{generated_ct, actionable, no_consent, total, entries:[{ids, name, phone_last4, submitted_ct,
+  consent, page, reasons, matched_rows, likely_match, import_review_hint, ...}]}`; never a full phone.
