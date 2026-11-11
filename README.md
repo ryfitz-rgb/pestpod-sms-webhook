@@ -113,5 +113,8 @@ Phones are compared on their last 10 digits (+1 and punctuation ignored). Nothin
 - `GET /dashboard/unmatched.json`: same list, dashboard session cookie.
 - `GET /api/v1/optin/unmatched`: same list for an automated reader; dashboard session or HTTP Basic with the
   existing `DASHBOARD_USER`/`DASHBOARD_PASSWORD` (shares the login throttle). No new env var.
+  The session cookie is scoped to `/dashboard`, so login (and each `/dashboard` visit) also sets the same
+  signed token scoped to exactly `/api/v1/optin/unmatched`; no other `/api` route receives it. Browsers get
+  a plain 401 (no `WWW-Authenticate`, so no password pop-up); scripts get the Basic challenge.
   JSON: `{generated_ct, actionable, no_consent, total, entries:[{ids, name, phone_last4, submitted_ct,
   consent, page, reasons, matched_rows, likely_match, import_review_hint, ...}]}`; never a full phone.
