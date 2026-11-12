@@ -52,6 +52,7 @@ def svc(monkeypatch):
     monkeypatch.setattr(main, "_service", s)
     monkeypatch.setattr(main, "_service_failed", False)
     monkeypatch.setattr(main, "_inbound_tab_ready", False)
+    monkeypatch.setattr(main, "_tech_col_ready", set())
     main._cache.update(at=0.0, data=None)
     return s
 
@@ -64,10 +65,14 @@ def _no_twilio_token(monkeypatch):
     # Signature validation is off unless a test turns it on (keeps a real env token out of tests).
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("WEBHOOK_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("TECH_NUMBERS", raising=False)
 
 
-def post(body, frm=PHONE, sid="SM123"):
-    r = client.post("/api/v1/sms/webhook", data={"From": frm, "Body": body, "MessageSid": sid})
+def post(body, frm=PHONE, sid="SM123", to=""):
+    data = {"From": frm, "Body": body, "MessageSid": sid}
+    if to:
+        data["To"] = to
+    r = client.post("/api/v1/sms/webhook", data=data)
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/xml")
     return html.unescape(r.text)
 
@@ -353,10 +358,10 @@ import asyncio, logging, threading, time
 from fastapi import BackgroundTasks
 
 
-def call_direct(body, frm=PHONE, sid="SMbg"):
+def call_direct(body, frm=PHONE, sid="SMbg", to=""):
     """Call the endpoint without TestClient so we can see state before background tasks run."""
     bt = BackgroundTasks()
-    r = main.sms_webhook(background_tasks=bt, From=frm, Body=body, MessageSid=sid)
+    r = main.sms_webhook(background_tasks=bt, From=frm, To=to, Body=body, MessageSid=sid)
     return html.unescape(r.body.decode()), bt
 
 
