@@ -13,6 +13,11 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
   service account email as Editor. If unset or invalid, Sheets is disabled and only `TEST_PHONE` matches.
 - `SHEET_ID` (optional): defaults to the PestPod Reminders v1 sheet.
 - `TEST_PHONE` (optional): fallback match when Sheets is unavailable.
+- `TECH_NUMBERS` (optional): maps a Twilio number we own to a tech name, e.g. `blain=+1504XXXXXXX`.
+  More than one is comma-separated (`blain=+1504XXXXXXX,pat=+1504YYYYYYY`). Inbound SMS to a
+  mapped number is tagged with that tech on the Inbound Log and Opt-Ins rows (same idea as the
+  `tech` field on a web opt-in). Leave a number out of the map (Ryan's 0822 stays off it) to
+  keep those texts untagged. Unset or empty: no change from today's behavior.
 - `TWILIO_AUTH_TOKEN`, `WEBHOOK_PUBLIC_URL` (optional): see Security.
 
 ## Security (Twilio signature validation)
@@ -32,11 +37,13 @@ signature gets HTTP 403: no lookup, no sheet writes, no log rows, no TwiML; a wa
 - Reply to Y (opted-in customer, wants service): `PestPod: Got it! We'll text you a day and time soon.` Reminder Status stays "Confirmed Y" (no "awaiting time" value in the dropdown).
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
 - `Inbound Log` tab (auto-created): Timestamp (America/Chicago), Phone, Body, MessageSid, Matched Row.
+  A 6th `Tech` column is added only when the text was sent to a number in `TECH_NUMBERS`.
 - "Opted in" = `Opt-In Status` is `Opted in` or `OK to Text?` is TRUE.
 - JOIN/REMIND, or Y/YES from a non-opted-in sender, from a phone on the Customers tab: `OK to Text?` = TRUE,
   `Opt-In Status` = `Opted in`, `Opt-In Method` = `Keyword JOIN` (must be in that column's dropdown),
   `Opt-In Date` = today (Chicago). From an unknown phone: a row in the `Opt-Ins` tab (auto-created:
-  Timestamp, Phone, Keyword, MessageSid, Matched Row); strangers are never added to Customers.
+  Timestamp, Phone, Keyword, MessageSid, Matched Row, and Tech when the text was to a mapped
+  number); strangers are never added to Customers.
   Either way the reply is the opt-in confirmation (`JOIN_REPLY` in `main.py`), except for YES:
   YES is a Twilio Advanced Opt-Out opt-in keyword, so Twilio already sends its own "You're
   subscribed" reply; the webhook records the opt-in and returns empty TwiML (no double welcome).

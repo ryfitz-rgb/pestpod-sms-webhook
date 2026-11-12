@@ -10,6 +10,10 @@ Env vars:
   CUSTOMER_STORE      "sheet" (default) or "postgres". With "postgres", every Sheets call
                       (webhook, batch.py, dashboard) is served from pestpod-db by gridstore.py
                       instead of Google; flipping back to "sheet" is the rollback.
+  TECH_NUMBERS        optional. Maps a Twilio number we own to a tech tag, e.g.
+                      "blain=+1504XXXXXXX" (comma-separated for more than one).
+                      Inbound SMS to a mapped number is tagged with that tech on the
+                      Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
 """
 import base64
 import json
@@ -80,6 +84,40 @@ def normalize_phone(raw) -> str:
     if len(digits) == 11 and digits.startswith("1"):
         return f"+{digits}"
     return raw
+
+
+def last10_digits(raw) -> str:
+    """Last 10 digits of a phone number, or "" if there aren't 10."""
+    digits = re.sub(r"[^\d]", "", str(raw or ""))
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def parse_tech_numbers(raw=None) -> dict:
+    """Parse TECH_NUMBERS='blain=+1504...,pat=+1...' into {last-10-digits: tech}.
+
+    Pairs are comma-separated. Surrounding whitespace and common phone punctuation
+    are ignored. Bad or incomplete pairs are skipped. Unset or empty -> {}.
+    """
+    text = os.environ.get("TECH_NUMBERS", "") if raw is None else raw
+    mapping = {}
+    for part in str(text or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        tech, number = part.split("=", 1)
+        tech = tech.strip().lower()[:40]
+        key = last10_digits(number)
+        if tech and key:
+            mapping[key] = tech
+    return mapping
+
+
+def tech_for_to(to_number: str) -> str | None:
+    """Tech tag for the Twilio number the text was sent to, or None if unmapped/unset."""
+    key = last10_digits(to_number)
+    if not key:
+        return None
+    return parse_tech_numbers().get(key)
 
 
 # ---------------------------------------------------------------- Sheets client
@@ -343,20 +381,47 @@ def _ensure_inbound_tab(svc) -> None:
     _inbound_tab_ready = True
 
 
-def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched_row=None) -> None:
+TECH_HEADER = "Tech"
+_tech_col_ready = set()
+
+
+def _ensure_tech_column(svc, tab: str) -> None:
+    """Write 'Tech' in F1 of an existing log tab, once per process. Never used when tech is blank."""
+    if tab in _tech_col_ready:
+        return
+    svc.spreadsheets().values().update(
+        spreadsheetId=SHEET_ID, range=f"{quote_tab(tab)}!F1",
+        valueInputOption="RAW", body={"values": [[TECH_HEADER]]},
+    ).execute()
+    _tech_col_ready.add(tab)
+
+
+def _append_log_row(svc, tab: str, values, tech=None) -> None:
+    """Append a log row. 5 columns as today when tech is blank; 6th Tech column only when set."""
+    row = list(values)
+    rng = f"{quote_tab(tab)}!A:E"
+    if tech:
+        _ensure_tech_column(svc, tab)
+        row.append(tech)
+        rng = f"{quote_tab(tab)}!A:F"
+    svc.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID, range=rng,
+        valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+        body={"values": [row]},
+    ).execute()
+
+
+def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched_row=None, tech=None) -> None:
     """Append an inbound message to the Inbound Log tab. Never raises."""
     ts = (timestamp or datetime.now(TZ)).astimezone(TZ).isoformat(timespec="seconds")
-    print(f"[INBOUND] {ts} | {phone} | {body} | SID={message_sid} | row={matched_row}")
+    tech_bit = f" | tech={tech}" if tech else ""
+    print(f"[INBOUND] {ts} | {phone} | {body} | SID={message_sid} | row={matched_row}{tech_bit}")
     svc = get_sheets()
     if svc is None:
         return
     try:
         _ensure_inbound_tab(svc)
-        svc.spreadsheets().values().append(
-            spreadsheetId=SHEET_ID, range=f"{quote_tab(INBOUND_TAB)}!A:E",
-            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
-            body={"values": [[ts, phone, body, message_sid, matched_row or ""]]},
-        ).execute()
+        _append_log_row(svc, INBOUND_TAB, [ts, phone, body, message_sid, matched_row or ""], tech)
     except Exception as e:
         log.warning("log_inbound failed (%s)", type(e).__name__)
 
@@ -438,20 +503,17 @@ def _ensure_optins_tab(svc) -> None:
     _optins_tab_ready = True
 
 
-def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, timestamp=None) -> None:
+def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, timestamp=None, tech=None) -> None:
     """Append a keyword opt-in to the Opt-Ins tab. Never raises."""
     ts = (timestamp or datetime.now(TZ)).astimezone(TZ).isoformat(timespec="seconds")
-    print(f"[OPT-INS] {ts} | {phone} | {keyword} | SID={message_sid} | row={matched_row}")
+    tech_bit = f" | tech={tech}" if tech else ""
+    print(f"[OPT-INS] {ts} | {phone} | {keyword} | SID={message_sid} | row={matched_row}{tech_bit}")
     svc = get_sheets()
     if svc is None:
         return
     try:
         _ensure_optins_tab(svc)
-        svc.spreadsheets().values().append(
-            spreadsheetId=SHEET_ID, range=f"{quote_tab(OPTINS_TAB)}!A:E",
-            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
-            body={"values": [[ts, phone, keyword, message_sid, matched_row or ""]]},
-        ).execute()
+        _append_log_row(svc, OPTINS_TAB, [ts, phone, keyword, message_sid, matched_row or ""], tech)
     except Exception as e:
         log.warning("log_optin failed (%s)", type(e).__name__)
 
@@ -530,6 +592,7 @@ def _background(fn, *args, **kwargs) -> None:
 def sms_webhook(
     background_tasks: BackgroundTasks,
     From: str = Form(""),
+    To: str = Form(""),
     Body: str = Form(""),
     MessageSid: str = Form(""),
 ):
@@ -542,6 +605,7 @@ def sms_webhook(
     # Case-insensitive, trimmed, trailing punctuation ignored ("y." / "Yes!" -> Y / YES).
     reply = re.sub(r"[\s.!]+$", "", Body.strip()).upper()
     phone = normalize_phone(From)
+    tech = tech_for_to(To)
 
     try:
         customer = find_customer_by_phone(phone)
@@ -550,7 +614,7 @@ def sms_webhook(
         customer = None
     row = customer.get("row") if customer else None
     opted_in = bool(customer and customer.get("opted_in"))
-    later(log_inbound, phone, Body, MessageSid, datetime.now(TZ), row)
+    later(log_inbound, phone, Body, MessageSid, datetime.now(TZ), row, tech)
 
     resp = MessagingResponse()
 
@@ -564,7 +628,7 @@ def sms_webhook(
         if row:
             later(mark_customer_opted_in, row, datetime.now(TZ).date())
         else:
-            later(log_optin, phone, reply, MessageSid, None, datetime.now(TZ))
+            later(log_optin, phone, reply, MessageSid, None, datetime.now(TZ), tech)
         if reply not in TWILIO_OPTIN_WORDS:
             resp.message(JOIN_REPLY)
         return PlainTextResponse(str(resp), media_type="application/xml")
