@@ -14,7 +14,7 @@ Env vars:
                       "blain=+1504XXXXXXX" (comma-separated for more than one).
                       Inbound SMS to a mapped number is tagged with that tech on the
                       Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
-  ALERT_EMAIL_ENABLED optional. true/1/yes to email Clyde when a customer replies Y.
+  ALERT_EMAIL_ENABLED optional. true/1/yes to email Ryan when a customer replies Y.
                       Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
 """
 import base64
@@ -530,7 +530,7 @@ DEFAULT_NAME = "Ryan"
 
 
 CONFIRM_REPLY = "PestPod: Got it! We'll text you a day and time soon."
-# Y when a future Proposed Appointment is already set (Clyde, Nov 14 2026): tell, don't ask.
+# Y when a future Proposed Appointment is already set (Ryan, Nov 14 2026): tell, don't ask.
 CONFIRMED_APPT_REPLY = "PestPod: You're confirmed for {appt}. See you then. Reply STOP to opt out."
 MAX_APPT_TEXT = 60  # longer free text falls back to CONFIRM_REPLY instead of a 2-segment reply
 

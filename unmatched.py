@@ -8,7 +8,7 @@ A web opt-in (Postgres table optin_signups, saved by POST /api/v1/optin) is flag
 
 Only the Customers tab counts as a match. Import Review rows are shown as a hint only.
 Nothing here writes to the Sheet or the database, and phones only ever leave as last 4.
-Clyde confirms each match by hand.
+Ryan confirms each match by hand.
 """
 import difflib
 import re
@@ -162,7 +162,7 @@ def find_unmatched(signups, customers, review_rows=()):
             "consent": consent,
             "page": page_tag(last.get("tech"), last.get("page_url")),
             "reasons": reasons,
-            "actionable": consent,  # consent given -> Clyde should fix the Sheet; no consent -> FYI only
+            "actionable": consent,  # consent given -> Ryan should fix the Sheet; no consent -> FYI only
             "matched_rows": [{"row": h.get("_row"), "account": str(h.get("Account") or "").strip(),
                               "name": _get(h, NAME_COLS),
                               "opt_in_status": str(h.get("Opt-In Status") or "").strip()} for h in hits],
