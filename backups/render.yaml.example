@@ -1,6 +1,6 @@
 # PLANNED Render settings for the nightly backup cron job. NOT a live Blueprint:
 # it is named .example on purpose so nothing syncs automatically.
-# Create the service only after Clyde approves.
+# Create the service only after Ryan approves.
 services:
   - type: cron
     name: pestpod-db-backup

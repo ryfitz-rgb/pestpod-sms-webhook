@@ -53,7 +53,7 @@ QUIET_START_HOUR, QUIET_END_HOUR = 9, 20  # send only 9:00 AM - 8:00 PM Chicago
 # Wave 1 due nudge, exact wording approved by Ryan (plain ASCII apostrophes keep it GSM-7 / 1 segment).
 TEMPLATE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 # Wave 2 (manual only): appointment reminder, used once a Proposed Appointment exists.
-# Exact wording approved by Clyde (Nov 14 2026): tell, don't ask. The tech name defaults to Ryan;
+# Exact wording approved by Ryan (Nov 14 2026): tell, don't ask. The tech name defaults to Ryan;
 # this batch only sends from Ryan's Messaging Service.
 TECH_NAME = (os.environ.get("BATCH_TECH_NAME") or "").strip() or "Ryan"
 APPT_TEMPLATE = ("PestPod: Reminder: {tech} will be out {appt} for your pest service. "

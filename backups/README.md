@@ -1,6 +1,6 @@
 # Nightly pestpod-db backup (Render Cron Job)
 
-**Status: code only.** No Render service has been created. Create it only after Clyde approves.
+**Status: code only.** No Render service has been created. Create it only after Ryan approves.
 
 ## What it does
 Once a night at about 3:05 AM Central:
