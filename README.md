@@ -81,7 +81,7 @@ only gets filled after Ryan proposes a day/time and the customer replies Y.
 - Template (exact): `PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out.`
   Sent via Messaging Service `MG7aa08d66618db7ad78ad6af28b793bf2`.
 - **Wave 2** (appointment reminder: `PestPod: Reminder: Ryan will be out {Proposed Appointment} for your pest
-  service. Please leave the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.`; the name comes
+  service. Reply Y to confirm. Reply STOP to opt out.`; the name comes
   from optional `BATCH_TECH_NAME`, default Ryan) is manual only: `--force-wave 2 --only-phone ...`. It never runs on the schedule.
 
 ```

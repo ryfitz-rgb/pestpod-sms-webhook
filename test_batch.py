@@ -6,8 +6,8 @@ from batch import TZ
 
 HEADER = ["Account", "Customer Name", "Phone (+1XXXXXXXXXX)", "Next Due", "Wave", "OK to Text?", "Opt-In Status",
           "Proposed Appointment", "Reminder Status", "Last Reply"]
-APPT_RYAN = ("PestPod: Reminder: Ryan will be out {appt} for your pest service. Please leave the gate "
-             "unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
+APPT_RYAN = ("PestPod: Reminder: Ryan will be out {appt} for your pest service. "
+             "Reply Y to confirm. Reply STOP to opt out.")
 NUDGE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 
 
@@ -384,11 +384,13 @@ def test_no_status_column_still_works():
 def test_appt_template_exact_ryan_wording():
     c = batch.parse_customers([HEADER, row("TEST-001", "Ryan", "+15555550156", appt="Tue 11/24 at 9 AM")])[1][0]
     msg = batch.render_message(c, 2)
-    assert msg == ("PestPod: Reminder: Ryan will be out Tue 11/24 at 9 AM for your pest service. Please leave "
-                   "the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
+    assert msg == APPT_RYAN.format(appt="Tue 11/24 at 9 AM")
     assert batch.TECH_NAME == "Ryan" and msg.isascii()
+    assert "gate" not in batch.APPT_TEMPLATE and "pets" not in batch.APPT_TEMPLATE
     assert "pest control" not in batch.APPT_TEMPLATE and "N to reschedule" not in batch.APPT_TEMPLATE
     assert "{name}" not in batch.APPT_TEMPLATE
+    typical = batch.APPT_TEMPLATE.format(tech="Ryan", appt="Thu 11/19 between 9-11 AM")
+    assert typical.isascii() and len(typical) <= 160  # GSM-7, one segment
 
 
 def test_dry_run_single_phone_force_wave_and_masked_output():
