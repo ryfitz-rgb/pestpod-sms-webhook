@@ -630,6 +630,74 @@ def render_unmatched(entries, err=""):
             f"{inner}</details>")
 
 
+# ------------------------------------------------------------------ wants a time (read-only)
+APPT_COL, LAST_REPLY_COL, REMINDER_COL = "Proposed Appointment", "Last Reply", "Reminder Status"
+
+
+def wants_time(rows, today: date, include_test=False):
+    """Customers who replied Y (Last Reply Y or Reminder Status Confirmed Y) and have no
+    Proposed Appointment today or later, so the office still owes them a day and time.
+    Skips cancelled rows, hidden/example rows (TEST rows only with include_test), and rows whose
+    Next Due month hasn't started yet (that Y belongs to a visit that's already done).
+    Read-only; phones only leave as last 4. Works on either customer store (same rows)."""
+    m = _main()
+    out = []
+    for d in rows:
+        if is_cancelled(d):
+            continue
+        if is_hidden_row(d) and not (include_test and str(d.get("Account", "")).upper().startswith("TEST")
+                                     and str(_get(d, "Customer Name", "Name")).strip()):
+            continue
+        said_y = (str(d.get(LAST_REPLY_COL, "")).strip().upper() == "Y"
+                  or str(d.get(REMINDER_COL, "")).strip().lower() == "confirmed y")
+        if not said_y:
+            continue
+        raw = d.get(APPT_COL, "")
+        has_appt = str(raw).strip() not in ("", "None")
+        ad = m.appt_date(raw, today) if has_appt else None
+        if ad and ad >= today:
+            continue  # already has a time
+        nd = serial_to_date(d.get("Next Due"))
+        if nd and (nd.year, nd.month) > (today.year, today.month):
+            continue  # not due yet: an old Y from a finished cycle
+        if not has_appt:
+            note = ""
+        elif ad is None:
+            note = f"Appointment unreadable: {str(raw).strip()[:40]}"
+        else:
+            note = f"Past appointment {ad.strftime('%b %-d')}"
+        out.append({
+            "row": d.get("_row"), "acct": str(d.get("Account", "")), "name": str(_get(d, "Customer Name", "Name")),
+            "city": str(d.get("City", "")), "phone_last4": _phone_last4(_get(d, "Phone (+1XXXXXXXXXX)", "Phone")),
+            "next_due": nd, "note": note,
+        })
+    out.sort(key=lambda x: (x["next_due"] or date.max, x["name"].lower()))
+    return out
+
+
+def _phone_last4(raw) -> str:
+    dg = re.sub(r"\D", "", str(raw or ""))
+    return dg[-4:] if len(dg) >= 4 else ""
+
+
+def render_wants_time(entries):
+    """The 'Wants a time' section: replied Y, no appointment yet. Read-only."""
+    if entries:
+        inner = "".join(
+            f"""<div class="cust wants" data-s="{e((x['name'] + ' ' + x['city'] + ' ' + x['acct'] + ' ' + x['phone_last4']).lower())}">
+<div class=top><div><div class=nm>{e(x['name'] or '(no name)')}</div><div class=addr>{e(x['city'] or '')}{' · ' if x['city'] else ''}Phone ending {e(x['phone_last4'] or '—')}</div></div>
+<div class=meta>Acct {e(x['acct'] or '—')}{(' · due ' + MONTHS[x['next_due'].month - 1] + ' ' + str(x['next_due'].year)) if x['next_due'] else ''}</div></div>"""
+            + (f"<div class=hint>{e(x['note'])}</div>" if x["note"] else "") + "</div>"
+            for x in entries)
+    else:
+        inner = "<div class=meta>Nobody is waiting on a time.</div>"
+    is_open = " open" if entries else ""
+    badge = f"<span class=badge>{len(entries)}</span>" if entries else ""
+    return (f"<details class='month wants'{is_open} id=wants-time><summary><span>Wants a time</span>{badge}</summary>"
+            f"<div class=meta>Replied Y with no appointment set yet. Text them a day and time, then put it in "
+            f"Proposed Appointment. Nothing here sends a text or changes the Sheet.</div>{inner}</details>")
+
+
 # ------------------------------------------------------------------ HTML
 CSS = """
 :root{--g:#1f5132;--g2:#2e7d4f;--lg:#eaf4ec;--red:#c8332b;--ink:#1d2a22;--mut:#5f6f65;--bd:#d9e4dc}
@@ -678,7 +746,7 @@ html[data-theme=dark] .tag{background:#24302a;color:#c9d6ce}html[data-theme=dark
 html[data-theme=dark] .tag.grn,html[data-theme=dark] .ok,html[data-theme=dark] .count{color:#8fd3a8}html[data-theme=dark] .tag.amb{background:#3a2e12;color:#f0cf8a}
 html[data-theme=dark] .tag.blu{background:#16263a;color:#9cc3ef}html[data-theme=dark] .pref b{color:#8fd3a8}html[data-theme=dark] .od-h{color:#f08a82}
 .badge{display:inline-block;min-width:20px;text-align:center;background:var(--red);color:#fff;border-radius:20px;padding:1px 7px;font-size:12px;font-weight:700;text-decoration:none}
-a.badge{margin-left:6px}.cust.signup{border-left-color:#d08a1e}.cust.signup.fyi{border-left-color:#7a8a80}
+a.badge{margin-left:6px}.cust.signup{border-left-color:#d08a1e}.cust.wants{border-left-color:#2e7d4f}a.badge.wt{background:#2e7d4f}.cust.signup.fyi{border-left-color:#7a8a80}
 details.month.unm>summary{border-bottom-color:#d08a1e}.unm .hint{font-size:13px;color:var(--mut);margin-top:4px}
 html[data-theme=dark] .badge{background:#b8352d;color:#fff}
 @media(max-width:560px){.top{flex-direction:column}.acts{flex-direction:column;align-items:stretch}.acts form{width:100%}.acts form .btn{flex:1}.acts input[type=date]{flex:1}}
@@ -802,7 +870,8 @@ def _cancelled_card(v, csrf):
 <button class="btn sm" type=submit>Reactivate</button></form>{undo}</div></div>"""
 
 
-def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None, signups=None):
+def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None, signups=None,
+                     wants=None):
     cancelled = [v for v in views if v.get("cancelled")]
     views = [v for v in views if not v.get("cancelled")]
     groups = {}
@@ -838,6 +907,10 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
         if n_act:
             hbadge = (f"<a class=badge href='#unmatched' title='Unmatched sign-ups' "
                       f"aria-label='{n_act} unmatched sign-ups'>{n_act}</a>")
+    wants_html = render_wants_time(wants) if wants is not None else ""
+    if wants:
+        hbadge += (f"<a class='badge wt' href='#wants-time' title='Wants a time' "
+                   f"aria-label='{len(wants)} want a time'>{len(wants)}</a>")
     fu = f" {_undo_form(flash_undo, csrf)}" if flash and flash_undo else ""
     fl = f"<div class=ok role=status>{e(flash)}{fu}</div>" if flash else ""
     hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{hbadge}{THEME_TOGGLE}
@@ -845,7 +918,7 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
 <a class="btn sm ghost" href="/dashboard">Refresh</a></div>
 <div class=sum>{len(views)} customers · {od} overdue · updated {datetime.now(TZ).strftime('%b %-d, %-I:%M %p')} CT</div>
-{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
+{wants_html}{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
 <script>document.getElementById('q').addEventListener('input',function(){{var q=this.value.toLowerCase().trim();
 document.querySelectorAll('.cust').forEach(function(c){{c.style.display=!q||c.dataset.s.indexOf(q)>=0?'':'none'}});
 if(q)document.querySelectorAll('details.month').forEach(function(d){{d.open=true}});}});</script>"""
@@ -963,7 +1036,8 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
     if msg in ("serviced", "cancelled", "reactivated", "edited") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
     resp = _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
-                                                  signups=load_unmatched(data["rows"]))))
+                                                  signups=load_unmatched(data["rows"]),
+                                                  wants=wants_time(data["rows"], today, include_test=bool(test)))))
     # Sessions from before this cookie existed pick up the endpoint-scoped copy on the next visit.
     _set_cookie(resp, request, COOKIE, request.cookies.get(COOKIE), SESSION_TTL, path=API_SESSION_PATH)
     return resp

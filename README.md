@@ -34,7 +34,9 @@ signature gets HTTP 403: no lookup, no sheet writes, no log rows, no TwiML; a wa
   `/health` and `/version` need no signature.
 
 ## Sheet writes
-- Reply to Y (opted-in customer, wants service): `PestPod: Got it! We'll text you a day and time soon.` Reminder Status stays "Confirmed Y" (no "awaiting time" value in the dropdown).
+- Reply to Y (opted-in customer): if Proposed Appointment is a readable date today or later, `PestPod: You're confirmed for {appt}. See you then. Reply STOP to opt out.`; otherwise (blank, past, unreadable) `PestPod: Got it! We'll text you a day and time soon.` Either way Reminder Status = "Confirmed Y".
+- Text-to-join confirmation (JOIN/REMIND, or Y from a non-opted-in number): `PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs/month. Msg & data rates may apply. Reply HELP for help, STOP to cancel.`
+- Dashboard **Wants a time**: read-only list of customers who replied Y and have no appointment today or later (skips cancelled rows and rows whose Next Due month hasn't started). Phones shown as last 4.
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
 - `Inbound Log` tab (auto-created): Timestamp (America/Chicago), Phone, Body, MessageSid, Matched Row.
   A 6th `Tech` column is added only when the text was sent to a number in `TECH_NUMBERS`.
@@ -78,12 +80,12 @@ only gets filled after Ryan proposes a day/time and the customer replies Y.
 - **Quiet hours:** only sends 9:00 AM-8:00 PM Chicago; 1.5 s between texts; `BATCH_MAX_SENDS` cap (200).
 - Template (exact): `PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out.`
   Sent via Messaging Service `MG7aa08d66618db7ad78ad6af28b793bf2`.
-- **Wave 2** (appointment reminder, old template `PestPod: Hi {Name}, your pest control service is scheduled for
-  {Proposed Appointment}. Reply Y to confirm or N to reschedule. Reply STOP to opt out. Msg & data rates may apply.`)
-  is manual only: `--force-wave 2 --only-phone ...`. It never runs on the schedule.
+- **Wave 2** (appointment reminder: `PestPod: Reminder: Ryan will be out {Proposed Appointment} for your pest
+  service. Please leave the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.`; the name comes
+  from optional `BATCH_TECH_NAME`, default Ryan) is manual only: `--force-wave 2 --only-phone ...`. It never runs on the schedule.
 
 ```
-python batch.py --dry-run                          # plan only: no texts, no writes
+python batch.py --dry-run                          # plan only: no texts, no writes (phones logged as last 4)
 python batch.py --dry-run --now 2026-11-03T10:00   # simulate a day
 python batch.py --only-phone +1XXXXXXXXXX --force-wave 1   # live single test send (ignores the due window)
 ```

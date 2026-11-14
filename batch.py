@@ -53,8 +53,11 @@ QUIET_START_HOUR, QUIET_END_HOUR = 9, 20  # send only 9:00 AM - 8:00 PM Chicago
 # Wave 1 due nudge, exact wording approved by Ryan (plain ASCII apostrophes keep it GSM-7 / 1 segment).
 TEMPLATE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 # Wave 2 (manual only): appointment reminder, used once a Proposed Appointment exists.
-APPT_TEMPLATE = ("PestPod: Hi {name}, your pest control service is scheduled for {appt}. "
-                 "Reply Y to confirm or N to reschedule. Reply STOP to opt out. Msg & data rates may apply.")
+# Exact wording approved by Clyde (Nov 14 2026): tell, don't ask. The tech name defaults to Ryan;
+# this batch only sends from Ryan's Messaging Service.
+TECH_NAME = (os.environ.get("BATCH_TECH_NAME") or "").strip() or "Ryan"
+APPT_TEMPLATE = ("PestPod: Reminder: {tech} will be out {appt} for your pest service. "
+                 "Please leave the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
 
 H_ACCOUNT, H_NAME, H_PHONE = "account", ("customer name", "name"), main.PHONE_HEADERS
 H_WAVE, H_OK, H_OPTIN = "wave", "ok to text?", "opt-in status"
@@ -69,9 +72,15 @@ def in_quiet_window(now: datetime) -> bool:
 
 
 def render_message(c, wave: int = 1) -> str:
-    msg = TEMPLATE if wave == 1 else APPT_TEMPLATE.format(name=c.name.strip(), appt=c.appt.strip())
+    msg = TEMPLATE if wave == 1 else APPT_TEMPLATE.format(tech=TECH_NAME, appt=c.appt.strip())
     assert msg.startswith("PestPod:")
     return msg
+
+
+def mask_phone(phone) -> str:
+    """Logs show only the last 4 digits of a phone."""
+    d = re.sub(r"\D", "", str(phone or ""))
+    return f"***-{d[-4:]}" if len(d) >= 4 else "-"
 
 
 def is_true(v) -> bool:
@@ -397,7 +406,7 @@ def run(now=None, dry_run=True, force_wave=None, only_phone=None, include_exampl
 
     if dry_run:
         for c in plan.sends:
-            out(f"  WOULD SEND row {c.row} {c.account or '-'} {c.phone} (Next Due {c.next_due or '-'}): "
+            out(f"  WOULD SEND row {c.row} {c.account or '-'} {mask_phone(c.phone)} (Next Due {c.next_due or '-'}): "
                 f"{render_message(c, plan.wave)}")
             out(f"      would write: Reminder Status -> {STATUS_FOR_WAVE[plan.wave]!r}; Outbound Log row")
         out("Dry run: nothing sent, nothing written.")
@@ -432,7 +441,7 @@ def run(now=None, dry_run=True, force_wave=None, only_phone=None, include_exampl
             summary["sent"] += 1
         else:
             summary["errors"] += 1
-        out(f"  {status.upper()} row {c.row} {c.phone} sid={sid or '-'}")
+        out(f"  {status.upper()} row {c.row} {mask_phone(c.phone)} sid={sid or '-'}")
     out(f"Done: {summary['sent']} sent, {summary['errors']} errors")
     return summary
 
