@@ -6,6 +6,8 @@ from batch import TZ
 
 HEADER = ["Account", "Customer Name", "Phone (+1XXXXXXXXXX)", "Next Due", "Wave", "OK to Text?", "Opt-In Status",
           "Proposed Appointment", "Reminder Status", "Last Reply"]
+APPT_RYAN = ("PestPod: Reminder: Ryan will be out {appt} for your pest service. Please leave the gate "
+             "unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
 NUDGE = "PestPod: You're due for pest service. Reply Y and we'll set a time. Reply STOP to opt out."
 
 
@@ -212,7 +214,7 @@ def test_wave2_forced_appointment_reminder():
     with pytest.raises(SystemExit):
         run(svc, at(2026, 11, 15), force_wave=2)
     _, snd, _ = run(svc, at(2026, 11, 15), force_wave=2, only_phone="+15555550101")
-    assert snd.sent[0][1].startswith("PestPod: Hi Al, your pest control service is scheduled for Wed 2026-11-25")
+    assert snd.sent[0][1] == APPT_RYAN.format(appt="Wed 2026-11-25 1:00 PM")
     assert svc.writes[-1]["data"][0]["values"] == [["Nudge 2 sent"]]
     assert run(svc, at(2026, 11, 15), force_wave=2, only_phone="+15555550102")[1].sent == []
 
@@ -376,3 +378,48 @@ def test_cancelled_rows_are_skipped():
 def test_no_status_column_still_works():
     plan = batch.build_plan(batch.parse_customers([HEADER, row("A", "Al", "+15555550101")])[1], [], at(2026, 11, 5))
     assert [c.name for c in plan.sends] == ["Al"]
+
+
+# ---------------------------------------------------------------- Ryan after-YES (Nov 14 2026)
+def test_appt_template_exact_ryan_wording():
+    c = batch.parse_customers([HEADER, row("TEST-001", "Ryan", "+15555550156", appt="Tue 11/24 at 9 AM")])[1][0]
+    msg = batch.render_message(c, 2)
+    assert msg == ("PestPod: Reminder: Ryan will be out Tue 11/24 at 9 AM for your pest service. Please leave "
+                   "the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
+    assert batch.TECH_NAME == "Ryan" and msg.isascii()
+    assert "pest control" not in batch.APPT_TEMPLATE and "N to reschedule" not in batch.APPT_TEMPLATE
+    assert "{name}" not in batch.APPT_TEMPLATE
+
+
+def test_dry_run_single_phone_force_wave_and_masked_output():
+    svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-11-03"),
+                   row("TEST-001", "Ryan", "+15555550156", due="2027-02-01", appt="Tue 11/24 at 9 AM"),
+                   row("B", "Bo", "+15555550104", due="2026-11-03")])
+    lines = []
+
+    def boom(*a): raise AssertionError("sender called in dry run")
+    s = batch.run(now=at(2026, 11, 16), dry_run=True, svc=svc, sender=boom, sleep=boom, force_wave=2,
+                  only_phone="(555) 555-0156", clock=lambda: at(2026, 11, 16), out=lines.append)
+    assert svc.mutations == 0 and s["planned"] == 1 and s["wave"] == 2
+    text = "\n".join(lines)
+    assert "WOULD SEND row 3 TEST-001 ***-0156" in text and "Ryan will be out Tue 11/24 at 9 AM" in text
+    assert "5555550156" not in text and "0101" not in text and "0104" not in text  # other rows filtered out
+    # wave 1 forced for the same phone is skipped while a future appointment is set
+    lines.clear()
+    s = batch.run(now=at(2026, 11, 16), dry_run=True, svc=svc, sender=boom, sleep=boom, force_wave=1,
+                  only_phone="+15555550156", clock=lambda: at(2026, 11, 16), out=lines.append)
+    assert s["planned"] == 0 and any("already set" in l for l in lines)
+
+
+def test_live_output_masks_phone():
+    svc = FakeSvc([row("A", "Al", "+15555550101", due="2026-11-03")])
+    lines = []
+    batch.run(now=at(2026, 11, 3), dry_run=False, svc=svc, sender=FakeSender(), sleep=lambda *_: None,
+              clock=lambda: at(2026, 11, 3), out=lines.append)
+    assert any("SENT row 2 ***-0101" in l for l in lines)
+    assert not any("5555550101" in l for l in lines)
+
+
+def test_mask_phone():
+    assert batch.mask_phone("+15555550156") == "***-0156"
+    assert batch.mask_phone("") == "-" and batch.mask_phone(None) == "-"

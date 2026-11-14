@@ -1,5 +1,6 @@
 """Offline tests: Sheets is mocked, no network, no real phone numbers."""
-import base64, html, json, re
+import base64, html, json, re, sys
+from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 import main
@@ -582,5 +583,68 @@ def test_health_and_version_need_no_signature(monkeypatch):
 
 
 def test_confirm_reply_exact_text():
-    assert main.confirm_reply("Sam", "Tue 10/27 at 9 AM") == "PestPod: Got it! We'll text you a day and time soon."
+    assert main.confirm_reply("Sam", "Tue 10/27 at 9 AM", date(2026, 11, 14)) == \
+        "PestPod: Got it! We'll text you a day and time soon."
     assert main.confirm_reply().isascii() and len(main.confirm_reply()) <= 160
+
+
+# ---------------------------------------------------------------- Ryan after-YES (Nov 14 2026)
+TODAY = date(2026, 11, 14)
+
+
+def test_join_reply_says_per_month():
+    assert main.JOIN_REPLY == ("PestPod: You're opted in to appointment reminders and confirmations. "
+                               "Up to 4 msgs/month. Msg & data rates may apply. Reply HELP for help, STOP to cancel.")
+    assert "per visit" not in main.JOIN_REPLY and len(main.JOIN_REPLY) <= 160
+
+
+def test_join_keyword_gets_per_month_text(svc):
+    t = post("JOIN", frm="+15555550000")
+    assert "Up to 4 msgs/month." in t and "per visit" not in t
+
+
+@pytest.mark.parametrize("appt,expect", [
+    ("Tue 11/24 at 9 AM", "PestPod: You're confirmed for Tue 11/24 at 9 AM. See you then. Reply STOP to opt out."),
+    ("Tue 2026-11-24 9:00 AM", "PestPod: You're confirmed for Tue 2026-11-24 9:00 AM. See you then. Reply STOP to opt out."),
+    ("Nov 24 at 9", "PestPod: You're confirmed for Nov 24 at 9. See you then. Reply STOP to opt out."),
+    ("Sat 11/14 at 2 PM", "PestPod: You're confirmed for Sat 11/14 at 2 PM. See you then. Reply STOP to opt out."),  # today
+    ("Tue 10/27 at 9 AM", main.CONFIRM_REPLY),      # past
+    ("2026-02-30", main.CONFIRM_REPLY),             # impossible date
+    ("next week sometime", main.CONFIRM_REPLY),     # unreadable
+    ("", main.CONFIRM_REPLY), (None, main.CONFIRM_REPLY),
+    ("Tue 11/24 at 9 AM - " + "x" * 60, main.CONFIRM_REPLY),  # too long for one text
+])
+def test_confirm_reply_context(appt, expect):
+    msg = main.confirm_reply("Sam", appt, TODAY)
+    assert msg == expect and msg.startswith("PestPod:") and len(msg) <= 160
+
+
+def test_appt_date_forms():
+    assert main.appt_date(46350.375, TODAY) == date(2026, 11, 24)   # Sheets serial (unformatted)
+    assert main.appt_date("Dec 3, 2026", TODAY) == date(2026, 12, 3)
+    assert main.appt_date("Jan 5", date(2026, 12, 20)) == date(2027, 1, 5)
+    assert main.appt_date("Feb 30", TODAY) is None
+    assert main.appt_date(True, TODAY) is None and main.appt_date("soon", TODAY) is None
+
+
+def test_y_with_future_appointment_confirms_it(svc, monkeypatch):
+    rows = [HEADER, ["T-1", "Sam", "555.555.0199", "Opted in", "Tue 2099-11-24 9:00 AM", "Nudge 2 sent", ""]]
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
+    t = post("Y")
+    assert "PestPod: You're confirmed for Tue 2099-11-24 9:00 AM. See you then." in t
+    assert t.count("<Message>") == 1
+    assert {"range": "'Customers'!G2", "values": [["Y"]]} in svc.writes
+    assert {"range": "'Customers'!F2", "values": [["Confirmed Y"]]} in svc.writes
+
+
+def test_y_with_past_appointment_gets_generic_reply(svc):
+    t = post("Y")  # Sam's appointment (Oct 27 2026) is in the past
+    assert "text you a day and time soon" in t and "confirmed for" not in t
+    assert {"range": "'Customers'!F3", "values": [["Confirmed Y"]]} in svc.writes
+
+
+def test_y_with_blank_appointment_never_uses_placeholder(svc, monkeypatch):
+    rows = [HEADER, ["T-1", "Sam", "555.555.0199", "Opted in", "", "Nudge 1 sent", ""]]
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
+    t = post("y")
+    assert "text you a day and time soon" in t and "10/27" not in t
