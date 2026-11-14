@@ -14,6 +14,8 @@ Env vars:
                       "blain=+1504XXXXXXX" (comma-separated for more than one).
                       Inbound SMS to a mapped number is tagged with that tech on the
                       Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
+  ALERT_EMAIL_ENABLED optional. true/1/yes to email Clyde when a customer replies Y.
+                      Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
 """
 import base64
 import json
@@ -31,6 +33,8 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Requ
 from fastapi.responses import PlainTextResponse
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
+
+import alert_email
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("pestpod")
@@ -285,7 +289,7 @@ def _find_col(cols: dict, *names):
 def _test_customer(phone: str):
     if TEST_PHONE and normalize_phone(phone) == normalize_phone(TEST_PHONE):
         return {"row": None, "name": "Ryan", "proposed_appointment": "Tue 10/27 at 9 AM",
-                "opted_in": True, "fields": {}}
+                "opted_in": True, "account": "", "fields": {}}
     return None
 
 
@@ -311,6 +315,7 @@ def find_customer_by_phone(phone: str):
             return {
                 "row": rownum,
                 "name": cell(ncol),
+                "account": cell(_find_col(cols, "account")),
                 "proposed_appointment": cell(acol),
                 "opted_in": (cell(_find_col(cols, "opt-in status")).lower() == "opted in"
                              or cell(_find_col(cols, "ok to text?")).upper() == "TRUE"),
@@ -690,8 +695,14 @@ def sms_webhook(
         name = customer.get("name") or DEFAULT_NAME
         appt = customer.get("proposed_appointment") or ""
         if reply in YES_WORDS:  # opted in (otherwise handled above)
-            resp.message(confirm_reply(name, appt, datetime.now(TZ).date()))
+            today = datetime.now(TZ)
+            resp.message(confirm_reply(name, appt, today.date()))
             later(update_customer_reply, row, "Y")
+            # Email only for Y, not YES (Twilio keyword) or any other reply.
+            if reply == "Y":
+                later(alert_email.send_y_alert, name, alert_email.last4(phone),
+                      customer.get("account") or "", Body.strip(),
+                      future_appt(appt, today.date()), today)
         elif reply in ("N", "NO") and opted_in:
             resp.message(reschedule_reply(name))
             later(update_customer_reply, row, "N")
