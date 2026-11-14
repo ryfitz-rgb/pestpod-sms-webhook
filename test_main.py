@@ -67,6 +67,10 @@ def _no_twilio_token(monkeypatch):
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("WEBHOOK_PUBLIC_URL", raising=False)
     monkeypatch.delenv("TECH_NUMBERS", raising=False)
+    monkeypatch.delenv("ALERT_EMAIL_ENABLED", raising=False)
+    monkeypatch.delenv("ALERT_EMAIL", raising=False)
+    monkeypatch.delenv("ALERT_EMAIL_FROM", raising=False)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
 
 
 def post(body, frm=PHONE, sid="SM123", to=""):
@@ -648,3 +652,68 @@ def test_y_with_blank_appointment_never_uses_placeholder(svc, monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
     t = post("y")
     assert "text you a day and time soon" in t and "10/27" not in t
+
+
+# ---------------------------------------------------------------- Y-alert email (Resend)
+def _enable_alerts(monkeypatch):
+    monkeypatch.setenv("ALERT_EMAIL_ENABLED", "true")
+    monkeypatch.setenv("ALERT_EMAIL", "alerts@pestpod.ai")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", "alerts@send.pestpod.ai")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_not_a_real_key")
+
+
+def test_y_confirmation_sends_alert_with_last4_only(svc, monkeypatch):
+    _enable_alerts(monkeypatch)
+    calls = []
+
+    def poster(payload, api_key):
+        calls.append((payload, api_key))
+
+    monkeypatch.setattr("alert_email._post_resend", poster)
+    t = post("Y")
+    assert "text you a day and time soon" in t
+    assert len(calls) == 1
+    payload, key = calls[0]
+    assert key == "re_test_not_a_real_key"
+    assert payload["to"] == ["alerts@pestpod.ai"]
+    assert payload["from"] == "alerts@send.pestpod.ai"
+    assert payload["subject"] == "PestPod: Y from Sam (***-0199)"
+    assert "[TEST]" not in payload["subject"]
+    assert "0199" in payload["subject"] and "5555550199" not in payload["subject"]
+    assert "5555550199" not in payload["text"] and PHONE not in payload["text"]
+    assert "Account: T-1" in payload["text"]
+    assert "wants a time" in payload["text"]  # Sam's Oct 27 appt is in the past
+
+
+def test_y_alert_test_account_gets_subject_prefix(svc, monkeypatch):
+    _enable_alerts(monkeypatch)
+    calls = []
+    monkeypatch.setattr("alert_email._post_resend", lambda payload, key: calls.append(payload))
+    t = post("Y", frm="+15555550101")  # Alice, account EX-1; her Nov 2 appt is in the past
+    assert "text you a day and time soon" in t
+    assert len(calls) == 1
+    assert calls[0]["subject"].startswith("[TEST] PestPod: Y from Alice (***-0101)")
+    assert "5555550101" not in calls[0]["subject"] + calls[0]["text"]
+
+
+def test_yes_stop_and_join_do_not_send_alert(svc, monkeypatch):
+    _enable_alerts(monkeypatch)
+    calls = []
+    monkeypatch.setattr("alert_email._post_resend", lambda *a, **k: calls.append(a))
+    post("YES")
+    post("STOP")
+    post("JOIN")
+    post("N")
+    assert calls == []
+
+
+def test_alert_http_error_does_not_affect_twiml(svc, monkeypatch):
+    _enable_alerts(monkeypatch)
+
+    def boom(payload, api_key):
+        raise RuntimeError(f"upstream 401 key={api_key}")
+
+    monkeypatch.setattr("alert_email._post_resend", boom)
+    t = post("Y")
+    assert "text you a day and time soon" in t
+    assert {"range": "'Customers'!G3", "values": [["Y"]]} in svc.writes

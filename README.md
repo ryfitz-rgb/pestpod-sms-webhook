@@ -19,6 +19,16 @@ Replies persist to the "PestPod Reminders v1" Google Sheet.
   `tech` field on a web opt-in). Leave a number out of the map (Ryan's 0822 stays off it) to
   keep those texts untagged. Unset or empty: no change from today's behavior.
 - `TWILIO_AUTH_TOKEN`, `WEBHOOK_PUBLIC_URL` (optional): see Security.
+- Y-alert email (optional, off unless `ALERT_EMAIL_ENABLED` is `true` / `1` / `yes`): when an opted-in
+  customer replies **Y** (not YES, STOP, or other keywords), a background task emails `ALERT_EMAIL`
+  via Resend. Missing any of these is a no-op; a mail failure is logged and never blocks the SMS reply.
+  - `ALERT_EMAIL`: recipient (e.g. `alerts@pestpod.ai`)
+  - `ALERT_EMAIL_FROM`: verified From address (e.g. `alerts@send.pestpod.ai`)
+  - `RESEND_API_KEY`: Resend API key (never logged)
+  - Subject is `PestPod: Y from {name} (***-{last4})`, prefixed `[TEST]` for `TEST-` / `EX-` accounts.
+    The body has name, last 4, account, reply, time (CT), and either the confirmed appointment or
+    "wants a time". Never a full phone.
+  - One-off test send (after the env vars are set): `python -m alert_email --test`
 
 ## Security (Twilio signature validation)
 `POST /api/v1/sms/webhook` checks the `X-Twilio-Signature` header (HMAC-SHA1 of the URL + form params,
@@ -34,7 +44,7 @@ signature gets HTTP 403: no lookup, no sheet writes, no log rows, no TwiML; a wa
   `/health` and `/version` need no signature.
 
 ## Sheet writes
-- Reply to Y (opted-in customer): if Proposed Appointment is a readable date today or later, `PestPod: You're confirmed for {appt}. See you then. Reply STOP to opt out.`; otherwise (blank, past, unreadable) `PestPod: Got it! We'll text you a day and time soon.` Either way Reminder Status = "Confirmed Y".
+- Reply to Y (opted-in customer): if Proposed Appointment is a readable date today or later, `PestPod: You're confirmed for {appt}. See you then. Reply STOP to opt out.`; otherwise (blank, past, unreadable) `PestPod: Got it! We'll text you a day and time soon.` Either way Reminder Status = "Confirmed Y". If the Y-alert email env vars are set, a background email goes to `ALERT_EMAIL` (last 4 only); it never delays this reply.
 - Text-to-join confirmation (JOIN/REMIND, or Y from a non-opted-in number): `PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs/month. Msg & data rates may apply. Reply HELP for help, STOP to cancel.`
 - Dashboard **Wants a time**: read-only list of customers who replied Y and have no appointment today or later (skips cancelled rows and rows whose Next Due month hasn't started). Phones shown as last 4.
 - Customers tab: `Last Reply` = Y/N and `Reminder Status` = "Confirmed Y"/"Reschedule N" (must match the column validation) on the matched row. If that combined write fails, Last Reply is retried alone.
