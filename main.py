@@ -22,7 +22,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from contextlib import asynccontextmanager
@@ -439,7 +439,7 @@ YES_WORDS = {"Y", "YES"}
 TWILIO_OPTIN_WORDS = {"YES"}
 # Mirrors the opt-in message registered on the A2P campaign, with the "PestPod:" prefix.
 JOIN_REPLY = (
-    "PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs per visit. "
+    "PestPod: You're opted in to appointment reminders and confirmations. Up to 4 msgs/month. "
     "Msg & data rates may apply. Reply HELP for help, STOP to cancel."
 )
 
@@ -522,15 +522,68 @@ def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, time
 # STOP/START/HELP are handled by Twilio Advanced Opt-Out on the Messaging Service.
 OPT_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "UNSTOP", "HELP", "INFO"}
 DEFAULT_NAME = "Ryan"
-DEFAULT_APPT = "Tue 10/27 at 9 AM"
 
 
 CONFIRM_REPLY = "PestPod: Got it! We'll text you a day and time soon."
+# Y when a future Proposed Appointment is already set (Clyde, Nov 14 2026): tell, don't ask.
+CONFIRMED_APPT_REPLY = "PestPod: You're confirmed for {appt}. See you then. Reply STOP to opt out."
+MAX_APPT_TEXT = 60  # longer free text falls back to CONFIRM_REPLY instead of a 2-segment reply
+
+_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+_MON_DAY = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?"
+                      r"(?:,?\s+(\d{4}))?\b", re.I)
 
 
-def confirm_reply(name: str = "", appointment: str = "") -> str:
-    # Y from an opted-in customer = wants service; office texts a day/time (Ryan, Oct 26 2026).
-    # Status stays "Confirmed Y" (the Customers dropdown has no "awaiting time" value).
+def appt_date(value, today: date):
+    """Best-effort date of a Proposed Appointment cell, or None if blank/unreadable.
+    Handles Sheets serial numbers (unformatted reads), the formatted 'Tue 2026-11-03 9:00 AM',
+    '11/24' / '11/24/26', and 'Nov 24'. Never raises."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return date(1899, 12, 30) + timedelta(days=int(value))
+        except (OverflowError, ValueError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    import batch  # lazy: batch imports main
+    d = batch.parse_appt_date(s, today)
+    if d:
+        return d
+    m = _MON_DAY.search(s)
+    if m:
+        try:
+            mo, day = _MONTHS[m[1].lower()[:3]], int(m[2])
+            if m[3]:
+                return date(int(m[3]), mo, day)
+            cand = date(today.year, mo, day)
+            if (today - cand).days > 180:  # "Jan 5" read in December
+                cand = date(today.year + 1, mo, day)
+            return cand
+        except ValueError:
+            return None
+    return None
+
+
+def future_appt(value, today: date) -> str:
+    """The appointment text if it is a readable date today or later, else ''."""
+    text = str(value or "").strip()
+    d = appt_date(text, today) if text else None
+    return text if d and d >= today else ""
+
+
+def confirm_reply(name: str = "", appointment: str = "", today=None) -> str:
+    # Y from an opted-in customer. With a future Proposed Appointment: confirm it. Otherwise
+    # they want service and the office texts a day/time (Ryan, Oct 26 2026). Either way the
+    # status is "Confirmed Y" (the Customers dropdown has no "awaiting time" value).
+    appt = future_appt(appointment, today or datetime.now(TZ).date())
+    if appt and len(appt) <= MAX_APPT_TEXT:
+        return CONFIRMED_APPT_REPLY.format(appt=appt)
     return CONFIRM_REPLY
 
 
@@ -635,9 +688,9 @@ def sms_webhook(
 
     if customer:
         name = customer.get("name") or DEFAULT_NAME
-        appt = customer.get("proposed_appointment") or DEFAULT_APPT
+        appt = customer.get("proposed_appointment") or ""
         if reply in YES_WORDS:  # opted in (otherwise handled above)
-            resp.message(confirm_reply(name, appt))
+            resp.message(confirm_reply(name, appt, datetime.now(TZ).date()))
             later(update_customer_reply, row, "Y")
         elif reply in ("N", "NO") and opted_in:
             resp.message(reschedule_reply(name))
