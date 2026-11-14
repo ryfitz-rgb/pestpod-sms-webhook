@@ -14,7 +14,7 @@ Env vars:
                       "blain=+1504XXXXXXX" (comma-separated for more than one).
                       Inbound SMS to a mapped number is tagged with that tech on the
                       Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
-  ALERT_EMAIL_ENABLED optional. true/1/yes to email Clyde when a customer replies Y.
+  ALERT_EMAIL_ENABLED optional. true/1/yes to email Ryan when a customer replies Y.
                       Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
 """
 import base64
