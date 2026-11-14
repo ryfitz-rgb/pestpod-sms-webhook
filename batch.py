@@ -57,7 +57,7 @@ TEMPLATE = "PestPod: You're due for pest service. Reply Y and we'll set a time. 
 # this batch only sends from Ryan's Messaging Service.
 TECH_NAME = (os.environ.get("BATCH_TECH_NAME") or "").strip() or "Ryan"
 APPT_TEMPLATE = ("PestPod: Reminder: {tech} will be out {appt} for your pest service. "
-                 "Please leave the gate unlocked and pets inside. Reply Y to confirm. Reply STOP to opt out.")
+                 "Reply Y to confirm. Reply STOP to opt out.")
 
 H_ACCOUNT, H_NAME, H_PHONE = "account", ("customer name", "name"), main.PHONE_HEADERS
 H_WAVE, H_OK, H_OPTIN = "wave", "ok to text?", "opt-in status"
