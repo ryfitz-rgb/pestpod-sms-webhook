@@ -113,7 +113,8 @@ def test_stop_silent_but_logged(svc):
 
 
 def test_garbage(svc):
-    assert "Reply Y to confirm or N to reschedule" in post("maybe?")
+    t = post("maybe?")
+    assert "<Message>" not in t and "Reply Y to confirm" not in t  # free text: no menu (no DB = no ack)
     assert not [w for w in svc.writes if w["range"].startswith("'Customers'")]
 
 
