@@ -1,4 +1,5 @@
-"""Optional email alert when an opted-in customer replies Y.
+"""Optional email alerts: an opted-in customer replied Y, or a customer sent a free-text message
+(anything that isn't Y/N/STOP/HELP/JOIN), so Ryan knows to answer from the dashboard.
 
 Sends via the Resend API when ALERT_EMAIL_ENABLED is on and the other env vars
 are set. Never raises: a mail failure must not affect the SMS reply.
@@ -24,6 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("pestpod.alert_email")
@@ -32,6 +34,8 @@ TZ = ZoneInfo("America/Chicago")
 RESEND_URL = "https://api.resend.com/emails"
 TIMEOUT_SEC = 10
 ENABLED_VALUES = {"true", "1", "yes"}
+DASHBOARD_URL = "https://app.pestpod.ai"
+MAX_MESSAGE_CHARS = 1000
 
 
 def last4(phone) -> str:
@@ -87,6 +91,46 @@ def body(name: str, last4_digits: str, account: str = "", reply_text: str = "Y",
     )
 
 
+def _stamp(now: datetime | None) -> str:
+    return (now or datetime.now(TZ)).astimezone(TZ).strftime("%Y-%m-%d %I:%M %p CT").replace(" 0", " ")
+
+
+def conversation_link(row=None, account: str = "") -> str:
+    """Dashboard link to this customer's texts (the dashboard itself if the row is unknown)."""
+    try:
+        r = int(row)
+    except (TypeError, ValueError):
+        r = 0
+    if r < 2:
+        return f"{DASHBOARD_URL}/dashboard"
+    return f"{DASHBOARD_URL}/dashboard/conversation?" + urlencode({"row": r, "acct": (account or "").strip()})
+
+
+def message_subject(name: str, last4_digits: str, account: str = "") -> str:
+    who = (name or "").strip() or "customer"
+    tail = (last4_digits or "").strip() or "----"
+    text = f"PestPod: Message from {who} (***-{tail})"
+    if is_test_account(account):
+        text = f"[TEST] {text}"
+    return text
+
+
+def message_body(name: str, last4_digits: str, account: str = "", message_text: str = "",
+                 row=None, now: datetime | None = None) -> str:
+    """Plain-text body for a free-text message alert. Phone is last 4 only."""
+    msg = (message_text or "").strip()
+    if len(msg) > MAX_MESSAGE_CHARS:
+        msg = msg[:MAX_MESSAGE_CHARS] + "…"
+    return (
+        f"Name: {(name or '').strip() or '—'}\n"
+        f"Phone: ***-{(last4_digits or '').strip() or '----'}\n"
+        f"Account: {(account or '').strip() or '—'}\n"
+        f"Message: {msg or '(no text, maybe a picture)'}\n"
+        f"Time: {_stamp(now)}\n"
+        f"Reply from the dashboard: {conversation_link(row, account)}\n"
+    )
+
+
 def _redact(text, key: str) -> str:
     s = str(text)
     if key:
@@ -138,6 +182,29 @@ def send_y_alert(name: str, last4_digits: str, account: str = "", reply_text: st
         return True
     except Exception as e:
         log.warning("Y alert email failed (%s): %s", type(e).__name__, _redact(e, cfg["key"]))
+        return False
+
+
+def send_message_alert(name: str, last4_digits: str, account: str = "", message_text: str = "",
+                       row=None, now: datetime | None = None, poster=None) -> bool:
+    """Email Ryan that a customer sent a free-text message. Same rules as send_y_alert:
+    gated on ALERT_EMAIL_ENABLED, never raises, phone last 4 only, API key never logged."""
+    cfg = _config()
+    if not cfg:
+        return False
+    try:
+        payload = {
+            "from": cfg["from"],
+            "to": [cfg["to"]],
+            "subject": message_subject(name, last4_digits, account),
+            "text": message_body(name, last4_digits, account, message_text, row, now),
+        }
+        (poster or _post_resend)(payload, cfg["key"])
+        log.info("message alert emailed to ALERT_EMAIL for %s ***-%s",
+                 (account or "").strip() or "—", (last4_digits or "").strip() or "----")
+        return True
+    except Exception as e:
+        log.warning("message alert email failed (%s): %s", type(e).__name__, _redact(e, cfg["key"]))
         return False
 
 
