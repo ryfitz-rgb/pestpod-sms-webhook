@@ -16,6 +16,8 @@ Env vars:
                       Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
   ALERT_EMAIL_ENABLED optional. true/1/yes to email Ryan when a customer replies Y.
                       Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
+  REPLY_BOX_ENABLED   optional. true/1/yes turns on the dashboard texts view + reply box
+                      (see conversations.py). Off if unset.
 """
 import base64
 import json
@@ -654,6 +656,25 @@ def sms_webhook(
     Body: str = Form(""),
     MessageSid: str = Form(""),
 ):
+    ctx = {}
+    resp = _sms_reply(background_tasks, From, To, Body, MessageSid, ctx)
+    # Conversation history (Postgres messages table): the inbound text and any auto-reply, after
+    # the response is sent. conversations.record never raises, so this can't break a reply.
+    try:
+        import conversations
+        when = datetime.now(TZ)
+        background_tasks.add_task(_background, conversations.record, normalize_phone(From), "in", "inbound",
+                                  Body, sid=MessageSid, status="received", account=ctx.get("account", ""),
+                                  row=ctx.get("row"), tech=ctx.get("tech"), when=when)
+        background_tasks.add_task(_background, conversations.record_twiml, normalize_phone(From),
+                                  resp.body.decode("utf-8", "replace"), account=ctx.get("account", ""),
+                                  row=ctx.get("row"), tech=ctx.get("tech"), when=when)
+    except Exception as e:
+        log.warning("conversation log scheduling failed (%s)", type(e).__name__)
+    return resp
+
+
+def _sms_reply(background_tasks, From, To, Body, MessageSid, ctx):
     # Speed matters: Twilio drops our TwiML reply after 15s. The only Sheets work done before
     # replying is the (cached) Customers lookup; every log/write below runs as a background
     # task after the response has been sent, in the order added.
@@ -672,6 +693,7 @@ def sms_webhook(
         customer = None
     row = customer.get("row") if customer else None
     opted_in = bool(customer and customer.get("opted_in"))
+    ctx.update(row=row, tech=tech, account=(customer.get("account") or "") if customer else "")
     later(log_inbound, phone, Body, MessageSid, datetime.now(TZ), row, tech)
 
     resp = MessagingResponse()
@@ -810,8 +832,10 @@ async def optin_signup(request: Request):
 
 # Dashboard v1 (login-gated; see dashboard.py)
 import dashboard  # noqa: E402
+import conversations  # noqa: E402
 
 app.include_router(dashboard.router)
+app.include_router(conversations.router)  # reply box; 404s unless REPLY_BOX_ENABLED
 
 
 if __name__ == "__main__":

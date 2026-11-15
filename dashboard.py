@@ -11,10 +11,13 @@ Routes (all under /dashboard):
   GET  /dashboard/unmatched.json       unmatched web sign-ups (read-only, session cookie)
   GET  /api/v1/optin/unmatched         same list for an automated reader (session cookie or HTTP Basic
                                        with the existing DASHBOARD_USER / DASHBOARD_PASSWORD; no new secret)
+  GET  /dashboard/conversation, POST /dashboard/conversation/send
+                                       per-customer texts + reply box (conversations.py; REPLY_BOX_ENABLED)
 
 Every serviced/cancel/reactivate write first appends a row to the "Undo Log" tab.
 
-Never writes Next Due (I) or OK to Text? (K): both are sheet formulas. Sends no texts.
+Never writes Next Due (I) or OK to Text? (K): both are sheet formulas. Sends no texts (the separate
+reply box in conversations.py, off unless REPLY_BOX_ENABLED, is the only thing that can).
 
 Env vars:
   DASHBOARD_PASSWORD   required; dashboard is disabled (503) when unset.
@@ -680,6 +683,17 @@ def _phone_last4(raw) -> str:
     return dg[-4:] if len(dg) >= 4 else ""
 
 
+def _convo_link(x) -> str:
+    """'Open texts' link into the customer's conversation view (only with REPLY_BOX_ENABLED)."""
+    import conversations
+    from urllib.parse import urlencode
+    if not conversations.enabled() or not x.get("row"):
+        return ""
+    q = urlencode({"row": x["row"], "acct": x.get("acct", "")})
+    return (f"<div class=acts><a class='btn sm ghost convo-link' href=\"/dashboard/conversation?{e(q)}\">"
+            f"Open texts</a></div>")
+
+
 def render_wants_time(entries):
     """The 'Wants a time' section: replied Y, no appointment yet. Read-only."""
     if entries:
@@ -687,7 +701,7 @@ def render_wants_time(entries):
             f"""<div class="cust wants" data-s="{e((x['name'] + ' ' + x['city'] + ' ' + x['acct'] + ' ' + x['phone_last4']).lower())}">
 <div class=top><div><div class=nm>{e(x['name'] or '(no name)')}</div><div class=addr>{e(x['city'] or '')}{' · ' if x['city'] else ''}Phone ending {e(x['phone_last4'] or '—')}</div></div>
 <div class=meta>Acct {e(x['acct'] or '—')}{(' · due ' + MONTHS[x['next_due'].month - 1] + ' ' + str(x['next_due'].year)) if x['next_due'] else ''}</div></div>"""
-            + (f"<div class=hint>{e(x['note'])}</div>" if x["note"] else "") + "</div>"
+            + (f"<div class=hint>{e(x['note'])}</div>" if x["note"] else "") + _convo_link(x) + "</div>"
             for x in entries)
     else:
         inner = "<div class=meta>Nobody is waiting on a time.</div>"
