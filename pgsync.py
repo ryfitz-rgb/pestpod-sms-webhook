@@ -58,6 +58,26 @@ CREATE INDEX IF NOT EXISTS optin_signups_phone_idx ON optin_signups (phone);
 -- the endpoint always writes the value explicitly.
 ALTER TABLE optin_signups ADD COLUMN IF NOT EXISTS sms_consent BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE optin_signups ALTER COLUMN sms_consent SET DEFAULT false;
+-- Conversation history for the dashboard texts view (conversations.py). Logged from the webhook
+-- (inbound + auto-replies), batch.py and the reply box. Phones are full E.164 here (same as
+-- customers.phone); the UI and logs only ever show the last 4.
+CREATE TABLE IF NOT EXISTS messages (
+  id              BIGSERIAL PRIMARY KEY,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  phone           TEXT NOT NULL,
+  account         TEXT,
+  customer_row    INTEGER,
+  direction       TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  kind            TEXT NOT NULL,
+  body            TEXT NOT NULL DEFAULT '',
+  twilio_sid      TEXT,
+  status          TEXT,
+  tech            TEXT,
+  idempotency_key TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS messages_phone_idx ON messages (phone, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS messages_sid_dir_idx ON messages (twilio_sid, direction)
+  WHERE twilio_sid IS NOT NULL AND twilio_sid <> '';
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          BIGSERIAL PRIMARY KEY,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
