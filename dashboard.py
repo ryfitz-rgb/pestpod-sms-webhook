@@ -694,12 +694,63 @@ def _convo_link(x) -> str:
             f"Open texts</a></div>")
 
 
-def render_wants_time(entries):
+def unread_texts(rows, include_test=False, now=None):
+    """Customers with unread inbound texts (newer than Ryan's last look at that conversation or his
+    last reply-box send). Only with REPLY_BOX_ENABLED; [] if the database is unavailable.
+    Same hidden/TEST rules as the route list. Phones only leave as last 4. Read-only."""
+    import conversations
+    if not conversations.enabled():
+        return []
+    counts = conversations.unread_counts(now=now)
+    if not counts:
+        return []
+    out, seen = [], set()
+    for d in rows:
+        if is_hidden_row(d) and not (include_test and str(d.get("Account", "")).upper().startswith("TEST")):
+            continue
+        phone = conversations.norm_phone(_get(d, "Phone (+1XXXXXXXXXX)", "Phone"))
+        u = counts.get(phone)
+        if not u or phone in seen or not d.get("_row"):
+            continue
+        seen.add(phone)
+        body = " ".join(str(u.get("body") or "").split())
+        out.append({"row": d.get("_row"), "acct": str(d.get("Account", "")),
+                    "name": str(_get(d, "Customer Name", "Name")), "city": str(d.get("City", "")),
+                    "phone_last4": _phone_last4(phone), "count": u["count"], "latest": u["latest"],
+                    "snippet": body[:80] + ("…" if len(body) > 80 else "")})
+    out.sort(key=lambda x: x["latest"], reverse=True)
+    return out
+
+
+def _unread_badge(n) -> str:
+    return (f"<span class='badge ur' title='Unread texts' aria-label='{n} unread'>{n}</span>" if n else "")
+
+
+def render_unread(entries):
+    """The 'Unread texts' section (reply box on and something unread). Opening one marks it read."""
+    if not entries:
+        return ""
+    import conversations
+    inner = "".join(
+        f"""<div class="cust unread" data-s="{e((x['name'] + ' ' + x['city'] + ' ' + x['acct'] + ' ' + x['phone_last4']).lower())}">
+<div class=top><div><div class=nm>{e(x['name'] or '(no name)')} {_unread_badge(x['count'])}</div><div class=addr>{e(x['city'] or '')}{' · ' if x['city'] else ''}Phone ending {e(x['phone_last4'] or '—')}</div></div>
+<div class=meta>Acct {e(x['acct'] or '—')} · {e(conversations.ct(x['latest']))}</div></div>"""
+        + (f"<div class=hint>“{e(x['snippet'])}”</div>" if x["snippet"] else "") + _convo_link(x) + "</div>"
+        for x in entries)
+    total = sum(x["count"] for x in entries)
+    return (f"<details class='month unreadsec' open id=unread-texts><summary><span>Unread texts</span>"
+            f"<span class='badge ur'>{total}</span></summary>"
+            f"<div class=meta>Customers who texted since you last opened their conversation. Opening it "
+            f"marks it read.</div>{inner}</details>")
+
+
+def render_wants_time(entries, unread_rows=None):
     """The 'Wants a time' section: replied Y, no appointment yet. Read-only."""
+    unread_rows = unread_rows or {}
     if entries:
         inner = "".join(
             f"""<div class="cust wants" data-s="{e((x['name'] + ' ' + x['city'] + ' ' + x['acct'] + ' ' + x['phone_last4']).lower())}">
-<div class=top><div><div class=nm>{e(x['name'] or '(no name)')}</div><div class=addr>{e(x['city'] or '')}{' · ' if x['city'] else ''}Phone ending {e(x['phone_last4'] or '—')}</div></div>
+<div class=top><div><div class=nm>{e(x['name'] or '(no name)')} {_unread_badge(unread_rows.get(x['row'], 0))}</div><div class=addr>{e(x['city'] or '')}{' · ' if x['city'] else ''}Phone ending {e(x['phone_last4'] or '—')}</div></div>
 <div class=meta>Acct {e(x['acct'] or '—')}{(' · due ' + MONTHS[x['next_due'].month - 1] + ' ' + str(x['next_due'].year)) if x['next_due'] else ''}</div></div>"""
             + (f"<div class=hint>{e(x['note'])}</div>" if x["note"] else "") + _convo_link(x) + "</div>"
             for x in entries)
@@ -760,9 +811,9 @@ html[data-theme=dark] .tag{background:#24302a;color:#c9d6ce}html[data-theme=dark
 html[data-theme=dark] .tag.grn,html[data-theme=dark] .ok,html[data-theme=dark] .count{color:#8fd3a8}html[data-theme=dark] .tag.amb{background:#3a2e12;color:#f0cf8a}
 html[data-theme=dark] .tag.blu{background:#16263a;color:#9cc3ef}html[data-theme=dark] .pref b{color:#8fd3a8}html[data-theme=dark] .od-h{color:#f08a82}
 .badge{display:inline-block;min-width:20px;text-align:center;background:var(--red);color:#fff;border-radius:20px;padding:1px 7px;font-size:12px;font-weight:700;text-decoration:none}
-a.badge{margin-left:6px}.cust.signup{border-left-color:#d08a1e}.cust.wants{border-left-color:#2e7d4f}a.badge.wt{background:#2e7d4f}.cust.signup.fyi{border-left-color:#7a8a80}
+a.badge{margin-left:6px}.cust.signup{border-left-color:#d08a1e}.cust.wants{border-left-color:#2e7d4f}a.badge.wt{background:#2e7d4f}a.badge.ur,.badge.ur{background:#1d5fa8}.cust.unread{border-left-color:#1d5fa8}.cust.signup.fyi{border-left-color:#7a8a80}
 details.month.unm>summary{border-bottom-color:#d08a1e}.unm .hint{font-size:13px;color:var(--mut);margin-top:4px}
-html[data-theme=dark] .badge{background:#b8352d;color:#fff}
+html[data-theme=dark] .badge{background:#b8352d;color:#fff}html[data-theme=dark] .badge.ur{background:#2f6fb8}
 @media(max-width:560px){.top{flex-direction:column}.acts{flex-direction:column;align-items:stretch}.acts form{width:100%}.acts form .btn{flex:1}.acts input[type=date]{flex:1}}
 """
 
@@ -885,7 +936,7 @@ def _cancelled_card(v, csrf):
 
 
 def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None, signups=None,
-                     wants=None):
+                     wants=None, unread=None):
     cancelled = [v for v in views if v.get("cancelled")]
     views = [v for v in views if not v.get("cancelled")]
     groups = {}
@@ -921,7 +972,14 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
         if n_act:
             hbadge = (f"<a class=badge href='#unmatched' title='Unmatched sign-ups' "
                       f"aria-label='{n_act} unmatched sign-ups'>{n_act}</a>")
-    wants_html = render_wants_time(wants) if wants is not None else ""
+    unread = unread or []
+    unread_html = render_unread(unread)
+    if unread:
+        n_unread = sum(x["count"] for x in unread)
+        hbadge += (f"<a class='badge ur' href='#unread-texts' title='Unread texts' "
+                   f"aria-label='{n_unread} unread texts'>{n_unread}</a>")
+    wants_html = (render_wants_time(wants, {x["row"]: x["count"] for x in unread})
+                  if wants is not None else "")
     if wants:
         hbadge += (f"<a class='badge wt' href='#wants-time' title='Wants a time' "
                    f"aria-label='{len(wants)} want a time'>{len(wants)}</a>")
@@ -932,7 +990,7 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
 <a class="btn sm ghost" href="/dashboard">Refresh</a></div>
 <div class=sum>{len(views)} customers · {od} overdue · updated {datetime.now(TZ).strftime('%b %-d, %-I:%M %p')} CT</div>
-{wants_html}{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
+{unread_html}{wants_html}{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
 <script>document.getElementById('q').addEventListener('input',function(){{var q=this.value.toLowerCase().trim();
 document.querySelectorAll('.cust').forEach(function(c){{c.style.display=!q||c.dataset.s.indexOf(q)>=0?'':'none'}});
 if(q)document.querySelectorAll('details.month').forEach(function(d){{d.open=true}});}});</script>"""
@@ -1051,7 +1109,8 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
     resp = _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
                                                   signups=load_unmatched(data["rows"]),
-                                                  wants=wants_time(data["rows"], today, include_test=bool(test)))))
+                                                  wants=wants_time(data["rows"], today, include_test=bool(test)),
+                                                  unread=unread_texts(data["rows"], include_test=bool(test)))))
     # Sessions from before this cookie existed pick up the endpoint-scoped copy on the next visit.
     _set_cookie(resp, request, COOKIE, request.cookies.get(COOKIE), SESSION_TTL, path=API_SESSION_PATH)
     return resp

@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_phone_idx ON messages (phone, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_sid_dir_idx ON messages (twilio_sid, direction)
   WHERE twilio_sid IS NOT NULL AND twilio_sid <> '';
+-- When Ryan last opened each customer's conversation on the dashboard. Inbound texts newer than
+-- this (and newer than his last reply-box send) count as unread (conversations.unread_counts).
+CREATE TABLE IF NOT EXISTS conversation_reads (
+  phone        TEXT PRIMARY KEY,
+  last_read_at TIMESTAMPTZ NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          BIGSERIAL PRIMARY KEY,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

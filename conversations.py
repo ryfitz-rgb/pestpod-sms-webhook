@@ -14,6 +14,14 @@ there the day the box is turned on. It sends nothing and touches no Sheet.
 The conversation view also folds in the existing Sheet logs ("Inbound Log", "Outbound Log"),
 read-only, so texts from before this table existed still show. No Twilio backfill is done.
 
+Unread texts: an inbound text is "unread" until Ryan opens that customer's conversation (or sends
+them a reply from the box). Read state lives in the `conversation_reads` table (pgsync.SCHEMA); the
+dashboard shows the counts only while REPLY_BOX_ENABLED is on.
+
+Free-text acknowledgement: the webhook claims at most one "Thanks, Ryan will get back to you soon"
+auto-reply per phone per Central day through claim_daily_ack (a unique key in `messages`, so two
+texts racing each other still get one reply). No database, an error or a slow database = no reply.
+
 Routes (all login-gated with the existing dashboard session; 404 while REPLY_BOX_ENABLED is off):
   GET  /dashboard/conversation?row=N&acct=A   one customer's texts, oldest first, times in CT
   POST /dashboard/conversation/send           send ONE text from Ryan's number (ending 0822)
@@ -30,13 +38,14 @@ Env vars:
                       (same credentials batch.py uses).
   DATABASE_URL        pestpod-db; required to send (idempotency + history), optional for logging.
 """
+import hashlib
 import logging
 import math
 import os
 import re
 import secrets
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, Request
@@ -149,12 +158,44 @@ class PgStore:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, r)) for r in cur.fetchall()][::-1]
 
+    def unread(self, since):
+        """{phone: {count, latest, body}} for inbound texts newer than both the last time Ryan
+        opened that conversation and his last reply-box send (failed sends don't count)."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(UNREAD_SQL, (since,))
+                return {r[0]: {"count": int(r[1]), "latest": r[2], "body": r[3] or ""} for r in cur.fetchall()}
+
+    def mark_read(self, phone, at):
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO conversation_reads (phone, last_read_at) VALUES (%s, %s) "
+                    "ON CONFLICT (phone) DO UPDATE SET last_read_at = "
+                    "GREATEST(conversation_reads.last_read_at, EXCLUDED.last_read_at)", (phone, at))
+            conn.commit()
+
+
+UNREAD_SQL = """
+SELECT m.phone, count(*), max(m.created_at),
+       (array_agg(m.body ORDER BY m.created_at DESC, m.id DESC))[1]
+FROM messages m
+LEFT JOIN conversation_reads r ON r.phone = m.phone
+WHERE m.direction = 'in' AND m.created_at >= %s
+  AND m.created_at > COALESCE(r.last_read_at, '-infinity'::timestamptz)
+  AND m.created_at > COALESCE((SELECT max(o.created_at) FROM messages o
+                               WHERE o.phone = m.phone AND o.direction = 'out' AND o.kind = 'manual'
+                                 AND COALESCE(o.status, '') NOT LIKE 'error%%'), '-infinity'::timestamptz)
+GROUP BY m.phone
+"""
+
 
 class MemoryStore:
     """Same behaviour as PgStore, in memory (tests and the local screenshot only)."""
 
     def __init__(self):
         self.rows, self._lock, self._n = [], threading.Lock(), 0
+        self.reads = {}
 
     def add(self, rec):
         with self._lock:
@@ -178,6 +219,27 @@ class MemoryStore:
         rows = [dict(r) for r in self.rows if r["phone"] == phone]
         rows.sort(key=lambda r: (r["created_at"], r["id"]))
         return rows[-limit:]
+
+    def unread(self, since):
+        out = {}
+        with self._lock:
+            rows = sorted(self.rows, key=lambda r: (r["created_at"], r["id"]))
+        for phone in {r["phone"] for r in rows}:
+            mine = [r for r in rows if r["phone"] == phone]
+            cut = [self.reads.get(phone)] + [r["created_at"] for r in mine if r["direction"] == "out"
+                                             and r["kind"] == "manual"
+                                             and not str(r.get("status") or "").startswith("error")]
+            cut = max((c for c in cut if c is not None), default=None)
+            new = [r for r in mine if r["direction"] == "in" and r["created_at"] >= since
+                   and (cut is None or r["created_at"] > cut)]
+            if new:
+                out[phone] = {"count": len(new), "latest": new[-1]["created_at"], "body": new[-1]["body"]}
+        return out
+
+    def mark_read(self, phone, at):
+        with self._lock:
+            cur = self.reads.get(phone)
+            self.reads[phone] = at if cur is None or at > cur else cur
 
 
 _store_override = None
@@ -226,6 +288,86 @@ def record_twiml(phone, twiml: str, account="", row=None, tech=None, when=None):
                        tech=tech, when=when)
     except Exception as e:
         log.warning("auto-reply log failed (%s, %s)", type(e).__name__, mask(phone))
+
+
+ACK_DB_TIMEOUT = 3.0  # seconds; Twilio drops the webhook reply after 15s
+
+
+def ack_key(phone, day) -> str:
+    """Idempotency key for the once-a-day free-text acknowledgement (no phone digits in it)."""
+    return "ack-" + hashlib.sha256(f"{norm_phone(phone)}|{day.isoformat()}".encode()).hexdigest()[:40]
+
+
+def claim_daily_ack(phone, body, when, account="", row=None, tech=None, timeout=None) -> bool:
+    """Record the free-text acknowledgement as today's (Central) auto-reply for this phone.
+    True only if this call claimed it; the webhook sends the text only then. Any doubt (no
+    database, an error, a duplicate, or a database slower than `timeout`) is False, so the worst
+    case is no acknowledgement, never a second one. Never raises."""
+    try:
+        store = get_store()
+        if store is None:
+            return False
+        when = when or datetime.now(TZ)
+        rec = {"created_at": when.astimezone(timezone.utc), "phone": norm_phone(phone),
+               "account": (str(account).strip() or None) if account else None, "customer_row": row or None,
+               "direction": "out", "kind": "auto_reply", "body": body, "twilio_sid": None, "status": "twiml",
+               "tech": tech or None, "idempotency_key": ack_key(phone, when.astimezone(TZ).date())}
+        result = {}
+
+        def run():
+            try:
+                result["id"] = store.add(rec)
+            except Exception as e:  # noqa: BLE001
+                result["err"] = type(e).__name__
+        t = threading.Thread(target=run, name="ack-claim", daemon=True)
+        t.start()
+        t.join(ACK_DB_TIMEOUT if timeout is None else timeout)
+        if t.is_alive():
+            log.warning("free-text ack skipped: database slow (%s)", mask(phone))
+
+            def tidy():  # if the insert lands late, say so on that row: the text did not go out
+                t.join()
+                if result.get("id"):
+                    try:
+                        store.finish(result["id"], None, "error: not sent (database slow)")
+                    except Exception:  # noqa: BLE001
+                        pass
+            threading.Thread(target=tidy, name="ack-tidy", daemon=True).start()
+            return False
+        if "err" in result:
+            log.warning("free-text ack skipped (%s, %s)", result["err"], mask(phone))
+            return False
+        return bool(result.get("id"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("free-text ack skipped (%s, %s)", type(e).__name__, mask(phone))
+        return False
+
+
+UNREAD_WINDOW_DAYS = 30  # older unread texts drop off the dashboard badge
+
+
+def unread_counts(now=None) -> dict:
+    """{E.164 phone: {count, latest, body}} of unread inbound texts. {} if unavailable. Never raises."""
+    try:
+        store = get_store()
+        if store is None:
+            return {}
+        since = ((now or datetime.now(TZ)) - timedelta(days=UNREAD_WINDOW_DAYS)).astimezone(timezone.utc)
+        return store.unread(since)
+    except Exception as e:  # noqa: BLE001
+        log.warning("unread count failed (%s)", type(e).__name__)
+        return {}
+
+
+def mark_read(phone, at=None) -> None:
+    """Ryan opened this conversation: everything up to `at` is read. Never raises."""
+    try:
+        store = get_store()
+        if store is None or not phone:
+            return
+        store.mark_read(norm_phone(phone), (at or datetime.now(TZ)).astimezone(timezone.utc))
+    except Exception as e:  # noqa: BLE001
+        log.warning("mark read failed (%s, %s)", type(e).__name__, mask(phone))
 
 
 # ------------------------------------------------------------------ thread assembly
@@ -611,6 +753,10 @@ def _view(request, row, acct, flash="", needs_confirm=False, draft="", status=20
     msgs, err = thread(phone) if phone else ([], "")
     block = block_reason(cust, msgs, _anytime(cust)) if phone else "No phone number on file."
     now = now or _clock()
+    if phone and not err:
+        # Opening the conversation marks it read (newest message shown, or now if later).
+        latest = max((m["created_at"] for m in msgs), default=now)
+        mark_read(phone, max(latest, now))
     html_ = render_conversation(cust, phone, msgs, d.csrf_for(s), secrets.token_urlsafe(24), now, block=block,
                                 flash=flash, needs_confirm=needs_confirm, draft=draft, load_err=err)
     return d._headers(HTMLResponse(html_, status_code=status))

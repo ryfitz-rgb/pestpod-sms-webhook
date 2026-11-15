@@ -14,8 +14,8 @@ Env vars:
                       "blain=+1504XXXXXXX" (comma-separated for more than one).
                       Inbound SMS to a mapped number is tagged with that tech on the
                       Inbound Log and Opt-Ins rows. Unset or empty: no tagging (same as today).
-  ALERT_EMAIL_ENABLED optional. true/1/yes to email Ryan when a customer replies Y.
-                      Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
+  ALERT_EMAIL_ENABLED optional. true/1/yes to email Ryan when a customer replies Y or sends a
+                      free-text message (with a link to that conversation). Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
   REPLY_BOX_ENABLED   optional. true/1/yes turns on the dashboard texts view + reply box
                       (see conversations.py). Off if unset.
 """
@@ -40,6 +40,9 @@ import alert_email
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("pestpod")
+# Twilio's client logs every API request at INFO, including the account id in the URL. Keep that
+# out of the Render logs; our own lines already say what was sent (phone last 4, SID shortened).
+logging.getLogger("twilio.http_client").setLevel(logging.WARNING)
 
 
 
@@ -422,7 +425,7 @@ def log_inbound(phone: str, body: str, message_sid: str, timestamp=None, matched
     """Append an inbound message to the Inbound Log tab. Never raises."""
     ts = (timestamp or datetime.now(TZ)).astimezone(TZ).isoformat(timespec="seconds")
     tech_bit = f" | tech={tech}" if tech else ""
-    print(f"[INBOUND] {ts} | {phone} | {body} | SID={message_sid} | row={matched_row}{tech_bit}")
+    print(f"[INBOUND] {ts} | ***-{alert_email.last4(phone) or '----'} | {body} | SID={message_sid} | row={matched_row}{tech_bit}")
     svc = get_sheets()
     if svc is None:
         return
@@ -514,7 +517,7 @@ def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, time
     """Append a keyword opt-in to the Opt-Ins tab. Never raises."""
     ts = (timestamp or datetime.now(TZ)).astimezone(TZ).isoformat(timespec="seconds")
     tech_bit = f" | tech={tech}" if tech else ""
-    print(f"[OPT-INS] {ts} | {phone} | {keyword} | SID={message_sid} | row={matched_row}{tech_bit}")
+    print(f"[OPT-INS] {ts} | ***-{alert_email.last4(phone) or '----'} | {keyword} | SID={message_sid} | row={matched_row}{tech_bit}")
     svc = get_sheets()
     if svc is None:
         return
@@ -527,7 +530,9 @@ def log_optin(phone: str, keyword: str, message_sid: str, matched_row=None, time
 
 # ---------------------------------------------------------------- replies
 # STOP/START/HELP are handled by Twilio Advanced Opt-Out on the Messaging Service.
-OPT_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "UNSTOP", "HELP", "INFO"}
+OPT_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "UNSTOP", "HELP", "INFO",
+                # Newer opt-out words (FCC 2025) that Twilio also honors: silent, never free text.
+                "REVOKE", "OPTOUT"}
 DEFAULT_NAME = "Ryan"
 
 
@@ -594,6 +599,17 @@ def confirm_reply(name: str = "", appointment: str = "", today=None) -> str:
     return CONFIRM_REPLY
 
 
+HELP_FALLBACK = "PestPod: Reply Y to confirm or N to reschedule. Reply HELP for help, STOP to opt out."
+# Free text from a customer (a question, "running late", etc.): no robotic menu. Ryan gets an
+# email and an unread badge; the customer gets this at most once per Central day.
+FREE_TEXT_ACK = "PestPod: Thanks, Ryan will get back to you soon. Reply STOP to opt out."
+
+
+def _opted_out_row(fields: dict) -> bool:
+    st = str((fields or {}).get("Opt-In Status", "")).strip().lower()
+    return "out" in st or "stop" in st
+
+
 def reschedule_reply(name: str) -> str:
     return (
         f"PestPod: Got it {name}, we'll reach out to reschedule your appointment. "
@@ -656,19 +672,20 @@ def sms_webhook(
     Body: str = Form(""),
     MessageSid: str = Form(""),
 ):
-    ctx = {}
+    when = datetime.now(TZ)
+    ctx = {"when": when}
     resp = _sms_reply(background_tasks, From, To, Body, MessageSid, ctx)
     # Conversation history (Postgres messages table): the inbound text and any auto-reply, after
     # the response is sent. conversations.record never raises, so this can't break a reply.
     try:
         import conversations
-        when = datetime.now(TZ)
         background_tasks.add_task(_background, conversations.record, normalize_phone(From), "in", "inbound",
                                   Body, sid=MessageSid, status="received", account=ctx.get("account", ""),
                                   row=ctx.get("row"), tech=ctx.get("tech"), when=when)
-        background_tasks.add_task(_background, conversations.record_twiml, normalize_phone(From),
-                                  resp.body.decode("utf-8", "replace"), account=ctx.get("account", ""),
-                                  row=ctx.get("row"), tech=ctx.get("tech"), when=when)
+        if not ctx.get("twiml_logged"):
+            background_tasks.add_task(_background, conversations.record_twiml, normalize_phone(From),
+                                      resp.body.decode("utf-8", "replace"), account=ctx.get("account", ""),
+                                      row=ctx.get("row"), tech=ctx.get("tech"), when=when)
     except Exception as e:
         log.warning("conversation log scheduling failed (%s)", type(e).__name__)
     return resp
@@ -728,13 +745,33 @@ def _sms_reply(background_tasks, From, To, Body, MessageSid, ctx):
         elif reply in ("N", "NO") and opted_in:
             resp.message(reschedule_reply(name))
             later(update_customer_reply, row, "N")
+        elif reply in ("N", "NO"):
+            # N from a non-opted-in row: help only, nothing marked (unchanged).
+            resp.message(HELP_FALLBACK)
         else:
-            # Includes N from a non-opted-in row: help only, nothing marked.
-            resp.message("PestPod: Reply Y to confirm or N to reschedule. Reply HELP for help, STOP to opt out.")
+            _free_text(customer, name, phone, Body, row, tech, ctx, resp, later)
     else:
         resp.message("PestPod: No matching appointment found. Reply HELP for help, STOP to opt out.")
 
     return PlainTextResponse(str(resp), media_type="application/xml")
+
+
+def _free_text(customer, name, phone, Body, row, tech, ctx, resp, later):
+    """A customer texted something that isn't a keyword. Email Ryan (background, after the reply)
+    and acknowledge at most once per Central day. No acknowledgement for opted-out rows or Anytime
+    stops, or when the once-a-day check can't be made (no/slow database): silence beats repeats."""
+    import conversations
+    when = ctx.get("when") or datetime.now(TZ)
+    account = customer.get("account") or ""
+    fields = customer.get("fields") or {}
+    later(alert_email.send_message_alert, name, alert_email.last4(phone), account, Body, row, when)
+    if _opted_out_row(fields) or conversations._anytime(fields):
+        return
+    # 1 ms after the inbound's timestamp so the conversation shows the question, then the ack.
+    if conversations.claim_daily_ack(phone, FREE_TEXT_ACK, when + timedelta(milliseconds=1),
+                                     account=account, row=row, tech=tech):
+        resp.message(FREE_TEXT_ACK)
+        ctx["twiml_logged"] = True  # already in the messages table; don't log it twice
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
