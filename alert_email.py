@@ -94,6 +94,9 @@ def _redact(text, key: str) -> str:
     return s
 
 
+USER_AGENT = "PestPod-Alerts/1.0 (+https://www.pestpod.ai)"
+
+
 def _post_resend(payload: dict, api_key: str) -> None:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -103,6 +106,9 @@ def _post_resend(payload: dict, api_key: str) -> None:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # Resend's API sits behind Cloudflare, which rejects Python's
+            # default "Python-urllib" User-Agent with 403 (error 1010).
+            "User-Agent": USER_AGENT,
         },
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
