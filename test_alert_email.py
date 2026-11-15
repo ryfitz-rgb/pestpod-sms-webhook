@@ -90,3 +90,23 @@ def test_error_is_swallowed_and_key_not_logged(monkeypatch, caplog):
     assert "Y alert email failed" in text
     assert "re_test_not_a_real_key" not in text
     assert "[redacted]" in text
+
+
+def test_post_resend_sends_custom_user_agent(monkeypatch):
+    """Cloudflare blocks the default Python-urllib UA; we must send our own."""
+    import alert_email
+    seen = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def fake_urlopen(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+        return _Resp()
+
+    monkeypatch.setattr(alert_email.urllib.request, "urlopen", fake_urlopen)
+    alert_email._post_resend({"to": "x"}, "re_test")
+    assert seen["ua"] == alert_email.USER_AGENT
+    assert "urllib" not in seen["ua"].lower()
