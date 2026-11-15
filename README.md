@@ -116,7 +116,8 @@ Login-gated route view at `/dashboard` (same service). Customers grouped by due 
 month, or `Office List Month` when that is later (pushed stops). EX-/TEST rows hidden.
 - **Mark as serviced**: date picker (defaults to today, backdating allowed) writes ONLY `Last Service Date` (H).
 - **Push to next month**: writes ONLY `Office List Month` (next month). Never touches H, I or K.
-- Next Due (I) and OK to Text? (K) are formulas and are never written. No texts are sent from the dashboard.
+- Next Due (I) and OK to Text? (K) are formulas and are never written. No texts are sent from the dashboard
+  (except the optional reply box below, off by default).
 - Env: `DASHBOARD_PASSWORD` (required; dashboard returns 503 when unset), `DASHBOARD_USER` (default `ryan`),
   `DASHBOARD_SECRET` (optional). Signed HttpOnly/Secure/SameSite=Lax session cookie (30 days), CSRF token on every POST,
   login throttled after 10 failures per IP per 15 min. Changing the password signs everyone out.
@@ -137,3 +138,29 @@ Phones are compared on their last 10 digits (+1 and punctuation ignored). Nothin
   a plain 401 (no `WWW-Authenticate`, so no password pop-up); scripts get the Basic challenge.
   JSON: `{generated_ct, actionable, no_consent, total, entries:[{ids, name, phone_last4, submitted_ct,
   consent, page, reasons, matched_rows, likely_match, import_review_hint, ...}]}`; never a full phone.
+
+### Texts view + reply box (`conversations.py`, off unless `REPLY_BOX_ENABLED`)
+One page per customer with every text to and from them, oldest first, times in Central (CT), and a
+box to reply from Ryan's business number (ending 0822).
+- **History**: the `messages` table in pestpod-db (created with the rest of `pgsync.SCHEMA`): phone,
+  account, row, direction (in/out), kind (`inbound`, `auto_reply`, `batch`, `manual`), body, time,
+  Twilio SID, status. Logged from the webhook (inbound + TwiML auto-replies, after the reply is sent),
+  `batch.py` live sends, and the reply box. Logging runs whenever `DATABASE_URL` is set, even with the
+  box off, and a logging failure never breaks a reply or a batch. The view also folds in the existing
+  `Inbound Log` / `Outbound Log` tabs (read-only, de-duplicated by SID) so older texts show. No Twilio backfill.
+- **Routes** (dashboard login + CSRF; 404 while `REPLY_BOX_ENABLED` is off):
+  `GET /dashboard/conversation?row=N&acct=A`, `POST /dashboard/conversation/send`.
+  The **Wants a time** list gets an "Open texts" link per customer when the box is on.
+- **Reply box**: live character + text-count (GSM-7 160/153, UCS-2 70/67 for emoji or curly quotes).
+  A "PestPod:" hint, not forced.
+- **Safety (server-side)**: blocked for opted-out customers (Opt-In Status says out, their latest
+  keyword was STOP/UNSUBSCRIBE/..., or Twilio last returned 21610), customers without text consent,
+  and Anytime stops. Outside 9 AM-8 PM CT it shows a warning and needs a "send it anyway" tick.
+  One send per form: the page's one-time key is claimed in Postgres before Twilio is called, so a
+  double click or resubmit can't send twice (the button also disables on click). Without
+  `DATABASE_URL` it refuses to send. Phones show as last 4 only, in the page and in logs.
+- **Sender**: Ryan's Messaging Service (`MG7aa08d...`, pinned in code, not read from env) with `From`
+  pinned to `REPLY_FROM_NUMBER`, which must end in 0822 and must not be Blain's 2533 or any number
+  `TECH_NUMBERS` maps to another tech. Twilio errors (21711) rather than switching numbers.
+- Env: `REPLY_BOX_ENABLED` (default off), `REPLY_FROM_NUMBER` (Ryan's E.164 number), and the same
+  `TWILIO_ACCOUNT_SID` + `TWILIO_API_KEY_SID`/`TWILIO_API_KEY_SECRET` (or `TWILIO_AUTH_TOKEN`) batch.py uses.

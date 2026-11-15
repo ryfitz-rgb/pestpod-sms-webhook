@@ -428,6 +428,12 @@ def run(now=None, dry_run=True, force_wave=None, only_phone=None, include_exampl
             status = f"error: {e}"
         except Exception as e:  # network etc.: may or may not have been delivered
             status = f"unknown: {type(e).__name__}"
+        try:  # conversation history (Postgres, when DATABASE_URL is set); never raises
+            import conversations
+            conversations.record(c.phone, "out", "batch", body, sid=sid, status=status, account=c.account,
+                                 row=c.row, tech="ryan", when=datetime.fromisoformat(ts))
+        except Exception as e:
+            out(f"  WARN message log failed for row {c.row} ({type(e).__name__})")
         try:
             append_outbound(svc, [ts, c.phone, c.name, str(plan.wave), body, sid, status, c.row])
         except Exception as e:
