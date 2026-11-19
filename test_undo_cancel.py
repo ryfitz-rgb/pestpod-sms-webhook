@@ -235,3 +235,19 @@ def test_edit_route(fs):
     assert c.post("/dashboard/edit", data={"row": 2, "acct": "1001", "address": "z"},
                   follow_redirects=False).status_code == 403  # no CSRF
     c.cookies.clear()
+
+
+def test_full_edit_and_add_work_on_sheet_store_too(fs, monkeypatch):
+    """DASHBOARD_EDIT_ENABLED on the Google Sheet store (CUSTOMER_STORE=sheet): same writes, no I/K."""
+    import customer_edit as ce
+    from datetime import date
+    monkeypatch.setenv("DASHBOARD_EDIT_ENABLED", "1")
+    monkeypatch.delenv("CUSTOMER_STORE", raising=False)
+    assert ce.save_edit(2, "1001", {"city": "Kenner", "last": "2026-11-01"}, date(2026, 11, 19)) == "saved"
+    assert fs.tabs["Customers"][1][4] == "Kenner" and fs.tabs["Customers"][1][7] == 46327
+    row, r = ce.add_customer({"acct": "2001", "name": "Sheet Add", "phone": "5045550123"}, date(2026, 11, 19))
+    assert (row, r) == (4, "added") and fs.tabs["Customers"][3][:3] == ["2001", "Sheet Add", "+15045550123"]
+    assert not any(l in ("I", "K") for t, l, _ in fs.written if t == "Customers")
+    dash._cache.update(t=0, rows=None)
+    assert dash.undo_last(4, "2001") == "undone"
+    assert fs.tabs["Customers"][3][:3] == ["", "", ""]

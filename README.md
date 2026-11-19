@@ -144,6 +144,28 @@ month, or `Office List Month` when that is later (pushed stops). EX-/TEST rows h
   login throttled after 10 failures per IP per 15 min. Changing the password signs everyone out.
 - Note: `batch.py` still nudges from `Next Due` only; it does not read `Office List Month` yet.
 
+### Add + edit customers (`customer_edit.py`, off unless `DASHBOARD_EDIT_ENABLED`)
+Ships dark. Set `DASHBOARD_EDIT_ENABLED=true` (or `1`/`yes`/`on`) on the Render service to turn it on;
+remove it (or set `false`) to turn it off. While off, the routes return 404 and the dashboard looks exactly
+as before (the older phone/address/city Edit keeps working either way).
+- **+ Add customer** (top of `/dashboard`): Account number (required, must not already be on the list),
+  Customer name (required), phone, address, city, service type, frequency, last service date, opt-in
+  status/method/date, pest and termite notes. Adds one row at the bottom with `Source` = `Dashboard`.
+- **Edit** on each card: the same fields (Account can't be changed). Only the columns that changed are written.
+- Writes go through `main.get_sheets()`, so they land in whichever store is live (`CUSTOMER_STORE=postgres`
+  -> gridstore; otherwise the Sheet). RAW values; dates stored as day serials. Never writes Next Due (I),
+  OK to Text? (K), Wave, Reminder Status, Last Reply, Proposed Appointment, Missed Count, Office List Month,
+  Status/Cancelled On, or Import Notes.
+- Checks: phone becomes `+1XXXXXXXXXX` (10-digit US), dates can't be in the future, text can't start with `=`.
+- **Consent**: OK to Text? turns TRUE on its own when Opt-In Status is "Opted in" and there's a phone. So marking
+  someone Opted in, or changing an opted-in customer's phone, needs the "Customer agreed to get texts at this
+  number" box ticked plus an Opt-In Method (asked again in a pop-up). Opt-In Date defaults to today. That save is
+  logged as action `optin`. Anyone Opted out, or whose texts end in a STOP, can't be opted back in here.
+- **Undo Log**: every add/edit appends a row first (action `add`, `edit` or `optin`; old/new values as JSON of the
+  changed columns in Old Status / New Status). The card's Undo button puts the old values back while nothing
+  has changed since. Undoing an add blanks that row (it drops off the list; nothing is deleted).
+- Same session login + CSRF token + origin check as every other dashboard form. Never sends a text.
+
 ### Unmatched sign-ups (`unmatched.py`, read-only)
 Section + red badge on `/dashboard` listing web opt-ins (`optin_signups`) that need a hand fix:
 **no phone match** on the Customers tab, **matched but not marked** (Opt-In Status/Method/Date, L/M/N, not
