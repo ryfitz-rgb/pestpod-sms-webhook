@@ -13,6 +13,9 @@ Routes (all under /dashboard):
                                        with the existing DASHBOARD_USER / DASHBOARD_PASSWORD; no new secret)
   GET  /dashboard/conversation, POST /dashboard/conversation/send
                                        per-customer texts + reply box (conversations.py; REPLY_BOX_ENABLED)
+  POST /dashboard/customer/add, POST /dashboard/customer/edit
+                                       add a customer / edit a customer's fields (customer_edit.py;
+                                       off unless DASHBOARD_EDIT_ENABLED). Logged in the Undo Log.
 
 Every serviced/cancel/reactivate write first appends a row to the "Undo Log" tab.
 
@@ -39,6 +42,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+
+import customer_edit
 
 log = logging.getLogger("pestpod.dashboard")
 router = APIRouter()
@@ -267,6 +272,10 @@ def view_row(d, today: date):
         "last": ls, "next_due": nd, "eff": eff, "pushed": pushed,
         "overdue": bool(eff and eff < cur), "anytime": bool(ANYTIME.search(notes)),
         "prefs": prefs, "notes": notes,
+        # raw values for the full Edit form (DASHBOARD_EDIT_ENABLED)
+        "pest_notes": str(d.get("Pest Notes", "") or ""), "termite_notes": str(d.get("Termite Notes", "") or ""),
+        "optin_status": str(d.get("Opt-In Status", "") or ""), "optin_method": str(d.get("Opt-In Method", "") or ""),
+        "optin_date": serial_to_date(d.get("Opt-In Date")),
     }
 
 
@@ -380,6 +389,8 @@ def undo_candidate(data, row: int):
         if str(e_["Row"]).strip() in (str(row), f"{row}.0") and not e_["Undone"].strip():
             if d is None or str(d.get("Account", "")).strip() != e_["Account"].strip():
                 return e_, False
+            if e_["Action"] in customer_edit.JSON_ACTIONS:
+                return e_, customer_edit.state_matches(d, e_["New Status"])
             new = e_["New Last Service"] if e_["Action"] == "serviced" else e_["New Status"]
             return e_, current_value(d, e_["Action"]) == new.strip()
     return None, False
@@ -484,10 +495,8 @@ def undo_last(row: int, acct: str):
         svc.spreadsheets().values().update(
             spreadsheetId=m.SHEET_ID, range=f"{tab}!{letter}{row}", valueInputOption="USER_ENTERED",
             body={"values": [[e_["Old Last Service"]]]}).execute()
-    elif e_["Action"] == "edit":
-        import json
-        old = {k: v for k, v in json.loads(e_["Old Status"]).items() if k in data["header"]}
-        _write_edit_cells(svc, m, data["header"], row, old)
+    elif e_["Action"] in customer_edit.JSON_ACTIONS:
+        customer_edit.undo_json(svc, m, data["header"], row, e_["Old Status"])
     else:
         _write_status(svc, m, data["header"], row, e_["Old Status"].strip())
     svc.spreadsheets().values().update(
@@ -782,6 +791,12 @@ input[type=text],input[type=password],input[type=date],input[type=search]{width:
 .err{background:#fdecea;color:#8a1f17;border-radius:10px;padding:10px 12px;margin-top:12px;font-size:14px}
 details.edit{width:100%}details.edit summary{list-style:none;display:inline-block}details.edit summary::-webkit-details-marker{display:none}
 details.edit form{margin-top:8px}details.edit input{margin-bottom:6px}
+input[type=tel],select,textarea{width:100%;padding:11px 12px;font-size:16px;border:1px solid var(--bd);border-radius:10px;background:#fff;color:inherit;font-family:inherit}
+.acts form.cform,form.cform{display:block;width:100%}.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.fgrid label{margin:8px 0 2px}.acts .fgrid input[type=date]{width:100%;padding:11px 12px;font-size:16px}.fgrid .wide{grid-column:1/-1}.fgrid input,.fgrid select,.fgrid textarea{margin-top:4px}
+.fgrid label.chk{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;font-weight:600}.fgrid label.chk input{width:auto;margin:2px 0 0}
+details.addc form{background:#fff;border:1px solid var(--bd);border-radius:12px;padding:12px 14px;margin-top:10px}
+@media(max-width:600px){.fgrid{grid-template-columns:1fr}}
 .ok{background:var(--lg);color:var(--g);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:14px}
 .bar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.bar input{flex:1;min-width:200px}
 .sum{color:var(--mut);font-size:13px}
@@ -805,7 +820,7 @@ header form{margin-left:8px}.tt svg{width:18px;height:18px;fill:none;stroke:curr
 .tt:focus-visible{outline:2px solid #fff;outline-offset:2px}
 html[data-theme=dark]{color-scheme:dark;--g:#14301f;--g2:#3a9a62;--lg:#1d3326;--ink:#e3ece6;--mut:#9fb1a6;--bd:#2c3b32}
 html[data-theme=dark] body{background:#0f1512}
-html[data-theme=dark] .card,html[data-theme=dark] .cust,html[data-theme=dark] input,html[data-theme=dark] .btn.ghost{background:#17201b;color:var(--ink)}
+html[data-theme=dark] .card,html[data-theme=dark] .cust,html[data-theme=dark] input,html[data-theme=dark] select,html[data-theme=dark] textarea,html[data-theme=dark] details.addc form,html[data-theme=dark] .btn.ghost{background:#17201b;color:var(--ink)}
 html[data-theme=dark] .btn.ghost{color:#8fd3a8}html[data-theme=dark] .cust.overdue{background:#24171a}
 html[data-theme=dark] .tag{background:#24302a;color:#c9d6ce}html[data-theme=dark] .tag.red,html[data-theme=dark] .err{background:#3b1d1b;color:#f3b4ae}
 html[data-theme=dark] .tag.grn,html[data-theme=dark] .ok,html[data-theme=dark] .count{color:#8fd3a8}html[data-theme=dark] .tag.amb{background:#3a2e12;color:#f0cf8a}
@@ -876,7 +891,91 @@ def _undo_form(v, csrf, label="Undo"):
             f"{e(v['name'])}?')\">{hidden}<button class=\"btn sm ghost\" type=submit>{e(label)}</button></form>")
 
 
-def _card(v, csrf, today):
+def _iso(d):
+    return d.isoformat() if d else ""
+
+
+def _customer_fields(f, today, prefix):
+    """Shared inputs for the Add and full Edit forms. f: {form field: current value}."""
+    ce = customer_edit
+    t = today.isoformat()
+    opts = list(ce.OPTIN_CHOICES)
+    cur = f.get("optin_status", "")
+    if cur and cur not in opts:
+        opts.insert(0, cur)  # keep an unusual existing value selectable as-is
+    sel = "".join(f"<option{' selected' if o == (cur or 'Not asked') else ''}>{e(o)}</option>" for o in opts)
+    return f"""<div class=fgrid>
+<label>Customer name<input type=text name=name value="{e(f.get('name'))}" maxlength=120 required></label>
+<label>Phone<input type=tel name=phone value="{e(f.get('phone'))}" placeholder="(504) 555-0123" inputmode=tel autocomplete=off data-was="{e(f.get('phone'))}"></label>
+<label>Address<input type=text name=address value="{e(f.get('address'))}" maxlength=200></label>
+<label>City<input type=text name=city value="{e(f.get('city'))}" maxlength=80 list=dl-city></label>
+<label>Service type<input type=text name=service value="{e(f.get('service'))}" maxlength=60 list=dl-service></label>
+<label>Frequency<input type=text name=freq value="{e(f.get('freq'))}" maxlength=40 list=dl-freq></label>
+<label>Last service date<input type=date name=last value="{e(f.get('last'))}" max="{t}"></label>
+<label>Opt-In status<select name=optin_status data-was="{e(cur)}">{sel}</select></label>
+<label>Opt-In method<input type=text name=optin_method value="{e(f.get('optin_method'))}" maxlength=60 list=dl-method placeholder="How they agreed"></label>
+<label>Opt-In date<input type=date name=optin_date value="{e(f.get('optin_date'))}" max="{t}"></label>
+<label class=wide>Pest notes<textarea name=pest_notes maxlength=1000 rows=2>{e(f.get('pest_notes'))}</textarea></label>
+<label class=wide>Termite notes<textarea name=termite_notes maxlength=1000 rows=2>{e(f.get('termite_notes'))}</textarea></label>
+<label class="wide chk"><input type=checkbox name=consent value=yes> Customer agreed to get texts at this number
+<span class=meta>(needed to mark Opted in, or to change an opted-in customer's phone)</span></label>
+</div>"""
+
+
+def _full_edit(v, csrf, today, hidden):
+    f = {"name": v["name"], "phone": v.get("phone", ""), "address": v["address"], "city": v["city"],
+         "service": v["service"], "freq": v["freq"], "last": _iso(v["last"]), "optin_status": v["optin_status"],
+         "optin_method": v["optin_method"], "optin_date": _iso(v["optin_date"]),
+         "pest_notes": v["pest_notes"], "termite_notes": v["termite_notes"]}
+    return (f"<details class=edit><summary class=\"btn sm ghost\">Edit</summary>"
+            f"<form method=post action=\"/dashboard/customer/edit\" class=cform>{hidden}"
+            f"<div class=meta>Acct {e(v['acct'])} (can't be changed here). Next Due and OK to Text? update on their own."
+            f"</div>{_customer_fields(f, today, 'e')}"
+            f"<button class=\"btn sm\" type=submit>Save</button></form>"
+            f"<div class=meta>Saving never sends a text. Every change goes in the Undo Log.</div></details>")
+
+
+def _add_form(csrf, today, prefill=None, err=""):
+    f = dict(prefill or {})
+    is_open = " open" if (err or prefill) else ""
+    er = f"<div class=err role=alert>{e(err)}</div>" if err else ""
+    return (f"<details class='month addc'{is_open} id=add-customer><summary><span>+ Add customer</span></summary>"
+            f"<form method=post action=\"/dashboard/customer/add\" class=cform>{er}"
+            f"<input type=hidden name=csrf value='{e(csrf)}'>"
+            f"<label>Account number<input type=text name=acct value=\"{e(f.get('acct'))}\" maxlength=40 required "
+            f"autocapitalize=characters></label>{_customer_fields(f, today, 'a')}"
+            f"<button class=\"btn sm\" type=submit>Add customer</button>"
+            f"<div class=meta>Adding someone never sends a text. You can undo it from their card.</div></form></details>")
+
+
+def _datalists(rows):
+    ce = customer_edit
+
+    def opts(vals):
+        return "".join(f"<option value=\"{e(x)}\">" for x in vals)
+
+    def distinct(col, extra=()):
+        seen = {}
+        for x in list(extra) + [str(r.get(col) or "").strip() for r in rows]:
+            if x and x.casefold() not in seen:
+                seen[x.casefold()] = x
+        return sorted(seen.values(), key=str.casefold)[:60]
+    return (f"<datalist id=dl-freq>{opts(ce.FREQ_CHOICES)}</datalist>"
+            f"<datalist id=dl-service>{opts(distinct('Service Type'))}</datalist>"
+            f"<datalist id=dl-city>{opts(distinct('City'))}</datalist>"
+            f"<datalist id=dl-method>{opts(distinct('Opt-In Method', ce.METHOD_SUGGESTIONS))}</datalist>")
+
+
+# Ask before a save that turns on texting. The server checks the same thing; this just warns first.
+EDIT_JS = """<script>document.querySelectorAll('form.cform').forEach(function(f){f.addEventListener('submit',function(ev){
+var s=f.querySelector('[name=optin_status]'),p=f.querySelector('[name=phone]'),c=f.querySelector('[name=consent]');
+if(!s)return;var on=s.value==='Opted in',was=(s.dataset.was||'')==='Opted in';
+var moved=on&&p&&p.value.replace(/\\D/g,'').slice(-10)!==(p.dataset.was||'').replace(/\\D/g,'').slice(-10);
+if(on&&(!was||moved)){if(!c.checked){alert('Tick \"Customer agreed to get texts at this number\" first.');ev.preventDefault();return;}
+if(!confirm('This marks them OK to text. Only do this if they agreed. Save?')){ev.preventDefault();}}});});</script>"""
+
+
+def _card(v, csrf, today, full_edit=False):
     tags = []
     if v["overdue"]:
         tags.append("<span class='tag red'>Overdue</span>")
@@ -903,7 +1002,10 @@ def _card(v, csrf, today):
              f"<button class=\"btn sm ghost\" type=submit>Cancel</button></form>")
     if v.get("undoable"):
         extra += _undo_form(v, csrf)
-    extra += (f"<details class=edit><summary class=\"btn sm ghost\">Edit</summary>"
+    if full_edit:
+        extra += _full_edit(v, csrf, today, hidden)
+    else:
+        extra += (f"<details class=edit><summary class=\"btn sm ghost\">Edit</summary>"
               f"<form method=post action=\"/dashboard/edit\">{hidden}"
               f"<label>Phone<input type=tel name=phone value=\"{e(v.get('phone', ''))}\" placeholder=\"(504) 555-0123\" inputmode=tel></label>"
               f"<label>Address<input type=text name=address value=\"{e(v['address'])}\" maxlength=200></label>"
@@ -936,7 +1038,8 @@ def _cancelled_card(v, csrf):
 
 
 def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo=None, signups=None,
-                     wants=None, unread=None):
+                     wants=None, unread=None, edit=None):
+    """edit: None = editing off; else {"rows": customer rows, "prefill": add-form values, "err": add error}."""
     cancelled = [v for v in views if v.get("cancelled")]
     views = [v for v in views if not v.get("cancelled")]
     groups = {}
@@ -959,7 +1062,7 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
         is_open = " open" if (k is None or k <= next_month(cur)) else ""
         cls = " class=od-h" if k and k < cur else ""
         parts.append(f"<details class=month{is_open}><summary><span{cls}>{e(label)}</span><span class=count>{len(lst)}</span></summary>"
-                     + "".join(_card(v, csrf, today) for v in lst) + "</details>")
+                     + "".join(_card(v, csrf, today, edit is not None) for v in lst) + "</details>")
     if cancelled:
         parts.append(f"<details class=month><summary><span>Cancelled</span><span class=count>{len(cancelled)}</span></summary>"
                      + "".join(_cancelled_card(v, csrf) for v in sorted(cancelled, key=lambda v: v["name"].lower()))
@@ -985,15 +1088,20 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
                    f"aria-label='{len(wants)} want a time'>{len(wants)}</a>")
     fu = f" {_undo_form(flash_undo, csrf)}" if flash and flash_undo else ""
     fl = f"<div class=ok role=status>{e(flash)}{fu}</div>" if flash else ""
+    add_html = ""
+    if edit is not None:
+        add_html = _add_form(csrf, today, edit.get("prefill"), edit.get("err", "")) + _datalists(edit.get("rows") or [])
     hdr = f"""<header><img src="/dashboard/static/pestpod-logo.png" alt=""><div><div class=t>PestPod</div><div class=s>Route dashboard</div></div>{hbadge}{THEME_TOGGLE}
 <form method=post action="/dashboard/logout"><input type=hidden name=csrf value="{e(csrf)}"><button type=submit>Sign out</button></form></header>"""
     body = f"""{fl}<div class=bar><input type=search id=q placeholder="Search name, street, city, account…" aria-label=Search>
 <a class="btn sm ghost" href="/dashboard">Refresh</a></div>
 <div class=sum>{len(views)} customers · {od} overdue · updated {datetime.now(TZ).strftime('%b %-d, %-I:%M %p')} CT</div>
-{unread_html}{wants_html}{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
+{add_html}{unread_html}{wants_html}{unm_html}{''.join(parts)}<footer>Mark as serviced writes only Last Service. Next Due recalculates in the sheet. No texts are sent from here.</footer>
 <script>document.getElementById('q').addEventListener('input',function(){{var q=this.value.toLowerCase().trim();
 document.querySelectorAll('.cust').forEach(function(c){{c.style.display=!q||c.dataset.s.indexOf(q)>=0?'':'none'}});
 if(q)document.querySelectorAll('details.month').forEach(function(d){{d.open=true}});}});</script>"""
+    if edit is not None:
+        body += EDIT_JS
     return _page("Dashboard", body, hdr)
 
 
@@ -1079,6 +1187,17 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
     s = _session(request)
     if not s:
         return RedirectResponse("/dashboard/login", status_code=303)
+    return _main_page(request, s, msg, test, row)
+
+
+EDIT_FLASH = {
+    "added": "Added. They're on the list under their due month. No text was sent.",
+    "saved": "Saved. The old values are in the Undo Log. No text was sent.",
+    "consent": "Saved, and text consent recorded (Opt-In status, method and date). No text was sent.",
+}
+
+
+def _main_page(request, s, msg="", test=0, row=0, add_prefill=None, add_err="", status=200):
     today = datetime.now(TZ).date()
     try:
         data = fetch_rows()
@@ -1104,13 +1223,18 @@ def dashboard(request: Request, msg: str = "", test: int = 0, row: int = 0):
              "nochange": "Nothing changed.",
              "badphone": "That phone number doesn't look right. Use a 10-digit US number, like (504) 555-0123.",
              "err": "That didn't save. Refresh and try again."}.get(msg, "")
+    edit = None
+    if customer_edit.enabled():
+        edit = {"rows": data["rows"], "prefill": add_prefill, "err": add_err}
+        flash = EDIT_FLASH.get(msg) or customer_edit.ERRORS.get(msg) or flash
     fu = None
-    if msg in ("serviced", "cancelled", "reactivated", "edited") and row:
+    if msg in ("serviced", "cancelled", "reactivated", "edited", "added", "saved", "consent") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
     resp = _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
                                                   signups=load_unmatched(data["rows"]),
                                                   wants=wants_time(data["rows"], today, include_test=bool(test)),
-                                                  unread=unread_texts(data["rows"], include_test=bool(test)))))
+                                                  unread=unread_texts(data["rows"], include_test=bool(test)),
+                                                  edit=edit), status_code=status))
     # Sessions from before this cookie existed pick up the endpoint-scoped copy on the next visit.
     _set_cookie(resp, request, COOKIE, request.cookies.get(COOKIE), SESSION_TTL, path=API_SESSION_PATH)
     return resp
@@ -1288,3 +1412,67 @@ def edit(request: Request, row: int = Form(...), acct: str = Form(...), phone: s
         log.info("dashboard: row %s (%s) edit -> %s", row, acct, r)
         return f"/dashboard?msg=edited&row={row}" if r == "saved" else "/dashboard?msg=nochange"
     return _simple_post(request, csrf, row, go)
+
+
+# ------------------------------------------------------------------ add / full edit (DASHBOARD_EDIT_ENABLED)
+ADD_KEEP = ("acct", "name", "phone", "address", "city", "service", "freq", "last", "optin_status", "optin_method",
+            "optin_date", "pest_notes", "termite_notes")
+
+
+async def _edit_post(request: Request):
+    """(form, session, error response). 404 while the flag is off, same auth + CSRF as every other form."""
+    if not _password():
+        return None, None, _disabled()
+    if not customer_edit.enabled():
+        return None, None, Response("Not Found", status_code=404)
+    form = await request.form()
+    s, bad = _check_post(request, str(form.get("csrf") or ""))
+    if bad:
+        return None, None, bad
+    return form, s, None
+
+
+@router.post("/dashboard/customer/add")
+async def customer_add(request: Request):
+    form, s, bad = await _edit_post(request)
+    if bad:
+        return bad
+    try:
+        row, result = customer_edit.add_customer(form)
+        return RedirectResponse(f"/dashboard?msg={result if result == 'consent' else 'added'}&row={row}",
+                                status_code=303)
+    except customer_edit.EditError as ex:
+        # Show the form again with what Ryan typed, so nothing has to be retyped.
+        prefill = {k: str(form.get(k) or "") for k in ADD_KEEP}
+        try:
+            return _main_page(request, s, add_prefill=prefill, add_err=customer_edit.ERRORS.get(ex.code, ""),
+                              status=400)
+        except Exception:
+            return RedirectResponse(f"/dashboard?msg={ex.code}", status_code=303)
+    except Exception as ex:
+        log.warning("dashboard add failed: %s", type(ex).__name__)
+        return RedirectResponse("/dashboard?msg=err", status_code=303)
+
+
+@router.post("/dashboard/customer/edit")
+async def customer_edit_post(request: Request):
+    form, _, bad = await _edit_post(request)
+    if bad:
+        return bad
+    try:
+        row = int(str(form.get("row") or "0"))
+    except ValueError:
+        row = 0
+    if row < 2:
+        return Response("Bad row", status_code=400)
+    acct = str(form.get("acct") or "")
+    try:
+        r = customer_edit.save_edit(row, acct, form)
+    except customer_edit.EditError as ex:
+        return RedirectResponse(f"/dashboard?msg={ex.code}&row={row}", status_code=303)
+    except Exception as ex:
+        log.warning("dashboard full edit failed: %s", type(ex).__name__)
+        return RedirectResponse("/dashboard?msg=err", status_code=303)
+    if r == "nochange":
+        return RedirectResponse("/dashboard?msg=nochange", status_code=303)
+    return RedirectResponse(f"/dashboard?msg={r}&row={row}", status_code=303)
