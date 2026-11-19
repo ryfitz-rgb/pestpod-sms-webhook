@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS conversation_reads (
   phone        TEXT PRIMARY KEY,
   last_read_at TIMESTAMPTZ NOT NULL
 );
+-- Sign-ups Ryan linked to a customer from the dashboard (signup_link.py). Notes only: the customer
+-- card holds the phone and consent; the sign-up leaves the unmatched list because its phone is
+-- now on a marked Customers row.
+CREATE TABLE IF NOT EXISTS optin_links (
+  id            BIGSERIAL PRIMARY KEY,
+  signup_id     BIGINT NOT NULL,
+  account       TEXT,
+  customer_row  INTEGER,
+  linked_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS optin_links_signup_idx ON optin_links (signup_id);
 CREATE TABLE IF NOT EXISTS sync_runs (
   id          BIGSERIAL PRIMARY KEY,
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -228,6 +239,21 @@ def list_optins() -> list:
                         "FROM optin_signups ORDER BY created_at, id")
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+OPTIN_LINKS_DDL = ("CREATE TABLE IF NOT EXISTS optin_links (id BIGSERIAL PRIMARY KEY, signup_id BIGINT NOT NULL, "
+                   "account TEXT, customer_row INTEGER, linked_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+
+
+def save_optin_link(signup_ids, account, customer_row) -> None:
+    """Note that these sign-up ids were linked to a customer from the dashboard. No phones stored here."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(OPTIN_LINKS_DDL)
+            for sid in signup_ids:
+                cur.execute("INSERT INTO optin_links (signup_id, account, customer_row) VALUES (%s, %s, %s)",
+                            (sid, str(account or ""), customer_row))
+        conn.commit()
 
 
 def review_rows() -> list:

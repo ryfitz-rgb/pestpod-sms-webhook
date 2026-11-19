@@ -16,6 +16,9 @@ Routes (all under /dashboard):
   POST /dashboard/customer/add, POST /dashboard/customer/edit
                                        add a customer / edit a customer's fields (customer_edit.py;
                                        off unless DASHBOARD_EDIT_ENABLED). Logged in the Undo Log.
+  GET  /dashboard/signup/link, POST /dashboard/signup/link
+                                       link an unmatched web sign-up to a customer: pick, confirm, copy the
+                                       sign-up's phone + consent server-side (signup_link.py; same flag).
 
 Every serviced/cancel/reactivate write first appends a row to the "Undo Log" tab.
 
@@ -594,7 +597,7 @@ def load_unmatched(customer_rows, force=False):
         return [], "Couldn't read web sign-ups right now."
 
 
-def _signup_card(x):
+def _signup_card(x, link=False):
     import unmatched
     tags = []
     for r in x["reasons"]:
@@ -618,14 +621,19 @@ def _signup_card(x):
         hints.append("No likely match on the Customers tab.")
     hint = "".join(f"<div class=hint>{h}</div>" for h in hints)
     fyi = "" if x["actionable"] else " fyi"
+    btn = ""
+    if link and x["consent"] and x["ids"]:
+        btn = (f"<div class=acts><a class=\"btn sm\" href=\"/dashboard/signup/link?id={int(x['ids'][-1])}\">"
+               f"Link to customer</a></div>")
     return f"""<div class="cust signup{fyi}" data-s="{e((x['name'] + ' ' + x['phone_last4']).lower())}">
 <div class=top><div><div class=nm>{e(x['name'] or '(no name)')}</div><div class=addr>Phone ending {e(x['phone_last4'] or '—')}</div></div>
 <div class=meta>{e(x['submitted_label'])}</div></div>
-<div class=tags>{''.join(tags)}</div>{hint}</div>"""
+<div class=tags>{''.join(tags)}</div>{hint}{btn}</div>"""
 
 
-def render_unmatched(entries, err=""):
-    """The 'Unmatched sign-ups' section. Read-only: fix each one in the Sheet by hand."""
+def render_unmatched(entries, err="", link=False):
+    """The 'Unmatched sign-ups' section. Read-only, except the "Link to customer" button
+    (link=True while DASHBOARD_EDIT_ENABLED), which opens the pick + confirm pages."""
     act = [x for x in entries if x["actionable"]]
     fyi = [x for x in entries if not x["actionable"]]
     if err:
@@ -633,17 +641,20 @@ def render_unmatched(entries, err=""):
     elif not entries:
         inner = "<div class=meta>All web sign-ups match a marked Customers row.</div>"
     else:
-        inner = "".join(_signup_card(x) for x in act)
+        inner = "".join(_signup_card(x, link) for x in act)
         if fyi:
             inner += ("<div class=meta style='margin-top:10px'><b>Contact only (no SMS consent):</b> never mark these "
-                      "Opted in or text them.</div>" + "".join(_signup_card(x) for x in fyi))
+                      "Opted in or text them.</div>" + "".join(_signup_card(x, link) for x in fyi))
     is_open = " open" if act or err else ""
     badge = f"<span class=badge>{len(act)}</span>" if act else ""
     extra = f"<span class=count>{len(fyi)} contact only</span>" if fyi else ""
     return (f"<details class='month unm'{is_open} id=unmatched><summary><span>Unmatched sign-ups</span>{badge}{extra}</summary>"
             f"<div class=meta>Web opt-ins whose phone isn't on the Customers tab, or whose row isn't marked "
-            f"(Opt-In Status / Method / Date). Nothing here changes the Sheet: confirm each match and fix it by hand.</div>"
-            f"{inner}</details>")
+            f"(Opt-In Status / Method / Date). "
+            + ("Use Link to customer to copy a sign-up's phone and consent onto the right customer (you confirm "
+               "first; no text is sent)." if link else
+               "Nothing here changes the Sheet: confirm each match and fix it by hand.")
+            + f"</div>{inner}</details>")
 
 
 # ------------------------------------------------------------------ wants a time (read-only)
@@ -1075,7 +1086,7 @@ def render_dashboard(views, csrf, today, flash="", show_hidden=False, flash_undo
     if signups is not None:
         entries, unm_err = signups
         n_act = sum(1 for x in entries if x["actionable"])
-        unm_html = render_unmatched(entries, unm_err)
+        unm_html = render_unmatched(entries, unm_err, link=edit is not None)
         if n_act:
             hbadge = (f"<a class=badge href='#unmatched' title='Unmatched sign-ups' "
                       f"aria-label='{n_act} unmatched sign-ups'>{n_act}</a>")
@@ -1198,6 +1209,8 @@ EDIT_FLASH = {
     "added": "Added. They're on the list under their due month. No text was sent.",
     "saved": "Saved. The old values are in the Undo Log. No text was sent.",
     "consent": "Saved, and text consent recorded (Opt-In status, method and date). No text was sent.",
+    "linked": ("Linked. The sign-up's phone and consent (Opted in, Web form, sign-up date) are on that customer "
+               "now. The old values are in the Undo Log. No text was sent."),
 }
 
 
@@ -1234,12 +1247,15 @@ def _main_page(request, s, msg="", test=0, row=0, add_prefill=None, add_err="", 
     if customer_edit.enabled():
         edit = {"rows": data["rows"], "prefill": add_prefill, "err": add_err}
         flash = EDIT_FLASH.get(msg) or customer_edit.ERRORS.get(msg) or flash
-    if msg in ("edited", "added", "saved", "consent") and row and flash:
+        if msg.startswith("link_"):
+            import signup_link
+            flash = signup_link.ERRORS.get(msg[5:], "") or flash
+    if msg in ("edited", "added", "saved", "consent", "linked") and row and flash:
         note = customer_edit.shared_phone_note(data["rows"], row)
         if note:
             flash = f"{flash} {note}"
     fu = None
-    if msg in ("serviced", "cancelled", "reactivated", "edited", "added", "saved", "consent") and row:
+    if msg in ("serviced", "cancelled", "reactivated", "edited", "added", "saved", "consent", "linked") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
     resp = _headers(HTMLResponse(render_dashboard(views, csrf_for(s), today, flash, flash_undo=fu,
                                                   signups=load_unmatched(data["rows"]),
@@ -1489,3 +1505,156 @@ async def customer_edit_post(request: Request):
     if r == "nochange":
         return RedirectResponse("/dashboard?msg=nochange", status_code=303)
     return RedirectResponse(f"/dashboard?msg={r}&row={row}", status_code=303)
+
+
+# ------------------------------------------------------------------ link a sign-up to a customer (DASHBOARD_EDIT_ENABLED)
+def _sub_header(title):
+    return (f"<header><img src=\"/dashboard/static/pestpod-logo.png\" alt=\"\"><div><div class=t>PestPod</div>"
+            f"<div class=s>{e(title)}</div></div>{THEME_TOGGLE}</header>")
+
+
+def _signup_box(name, last4, when, page):
+    tag = f" <span class='tag blu'>{e(page)}</span>" if page else ""
+    return (f"<div class=cust><div class=top><div><div class=nm>{e(name or '(no name)')}</div>"
+            f"<div class=addr>Phone ending {e(last4 or '—')}</div></div><div class=meta>{e(when)}</div></div>"
+            f"<div class=tags><span class='tag grn'>Consent: yes</span>{tag}</div></div>")
+
+
+def render_link_picker(p, err=""):
+    x = p["entry"]
+    sid = int(x["ids"][-1])
+    items = []
+    for c in p["customers"]:
+        tags = [f"<span class='tag {'grn' if c['last4'] else ''}'>"
+                f"{'Phone ending ' + e(c['last4']) if c['last4'] else 'No phone'}</span>"]
+        if c["status"]:
+            tags.append(f"<span class='tag {'red' if customer_edit._is_opted_out(c['status']) else ''}'>"
+                        f"{e(c['status'])}</span>")
+        if c["likely"]:
+            tags.append("<span class='tag amb'>Likely match</span>")
+        if c["cancelled"]:
+            tags.append("<span class='tag red'>Cancelled</span>")
+        href = f"/dashboard/signup/link?id={sid}&amp;row={int(c['row'])}&amp;acct={e(_q(c['acct']))}"
+        s_ = e(f"{c['name']} {c['acct']} {c['city']}".lower())
+        items.append(f"<div class=cust data-s=\"{s_}\"><div class=top><div><div class=nm>{e(c['name'])}</div>"
+                     f"<div class=addr>Acct {e(c['acct'] or '—')}{' · ' + e(c['city']) if c['city'] else ''}</div></div>"
+                     f"<div class=acts><a class=\"btn sm\" href=\"{href}\">Pick</a></div></div>"
+                     f"<div class=tags>{''.join(tags)}</div></div>")
+    er = f"<div class=err role=alert>{e(err)}</div>" if err else ""
+    body = (f"{er}<h2>Link sign-up to a customer</h2>{_signup_box(x['name'], x['phone_last4'], x['submitted_label'], x['page'])}"
+            f"<div class=meta>Pick the customer this sign-up belongs to. You'll confirm on the next page. Nothing is "
+            f"saved yet, and no text is ever sent from here.</div>"
+            f"<div class=bar><input type=search id=q placeholder=\"Search name, account, city…\" aria-label=Search autofocus>"
+            f"<a class=\"btn sm ghost\" href=\"/dashboard#unmatched\">Back</a></div>"
+            f"{''.join(items) or '<div class=meta>No customers to pick from.</div>'}"
+            "<script>document.getElementById('q').addEventListener('input',function(){var q=this.value.toLowerCase().trim();"
+            "document.querySelectorAll('.cust[data-s]').forEach(function(c){c.style.display=!q||c.dataset.s.indexOf(q)>=0?'':'none'});});</script>")
+    return _page("Link sign-up", body, _sub_header("Link sign-up"))
+
+
+def render_link_confirm(v, csrf, err=""):
+    import signup_link
+    refused = signup_link.ERRORS.get(v["refused"], "") if v["refused"] else ""
+    msgs = ""
+    if err:
+        msgs += f"<div class=err role=alert>{e(err)}</div>"
+    if refused and refused != err:
+        msgs += f"<div class=err role=alert>{e(refused)}</div>"
+    warn = "".join(f"<div class=hint><span class='tag amb'>Check</span> {e(w)}</div>" for w in v["warnings"])
+    cur = (f"<div class=addr>Acct {e(v['acct'])} · {'Phone ending ' + e(v['cur_last4']) if v['cur_last4'] else 'No phone on file'}"
+           f"</div>")
+    status = v["cur_status"] or "blank"
+    back = f"/dashboard/signup/link?id={int(v['signup_id'])}"
+    if v["refused"]:
+        action = f"<div class=acts><a class=\"btn sm ghost\" href=\"{back}\">Pick someone else</a></div>"
+    else:
+        action = (f"<form method=post action=\"/dashboard/signup/link\" class=acts>"
+                  f"<input type=hidden name=csrf value='{e(csrf)}'><input type=hidden name=id value='{int(v['signup_id'])}'>"
+                  f"<input type=hidden name=row value='{int(v['row'])}'><input type=hidden name=acct value='{e(v['acct'])}'>"
+                  f"<input type=hidden name=confirm value=yes>"
+                  f"<button class=btn type=submit>Confirm link</button>"
+                  f"<a class=\"btn sm ghost\" href=\"{back}\">Pick someone else</a></form>")
+    body = (f"{msgs}<h2>Confirm link</h2>"
+            f"<div class=meta>Sign-up</div>{_signup_box(v['signup_name'], v['signup_last4'], v['submitted_label'], v['page'])}"
+            f"<div class=meta>Customer</div><div class=cust><div class=top><div><div class=nm>{e(v['name'])}</div>{cur}</div>"
+            f"<div class=meta>Opt-In status: {e(status)}</div></div></div>"
+            f"<div class=card><b>On confirm, this customer gets:</b><ul>"
+            f"<li>Phone: the sign-up's number (ending {e(v['signup_last4'])})</li>"
+            f"<li>Opt-In status: Opted in</li><li>Opt-In method: Web form</li>"
+            f"<li>Opt-In date: {e(v['optin_date'] or '—')} (the day they signed up)</li></ul>"
+            f"<div class=meta>No text is sent. The old values go in the Undo Log, so Undo on their card puts them back."
+            f"</div></div>{warn}{action}")
+    return _page("Confirm link", body, _sub_header("Link sign-up"))
+
+
+def _q(s):
+    from urllib.parse import quote
+    return quote(str(s or ""), safe="")
+
+
+def _link_url(sid, row=0, acct="", err=""):
+    u = f"/dashboard/signup/link?id={int(sid)}"
+    if row:
+        u += f"&row={int(row)}&acct={_q(acct)}"
+    if err:
+        u += f"&err={_q(err)}"
+    return u
+
+
+LINK_TO_DASHBOARD = ("nosignup", "linked", "noconsent", "badphone")
+
+
+@router.get("/dashboard/signup/link")
+def signup_link_page(request: Request, id: int = 0, row: int = 0, acct: str = "", err: str = ""):
+    import signup_link
+    if not _password():
+        return _disabled()
+    if not customer_edit.enabled():
+        return Response("Not Found", status_code=404)
+    s = _session(request)
+    if not s:
+        return RedirectResponse("/dashboard/login", status_code=303)
+    msg = signup_link.ERRORS.get(err, "")
+    try:
+        if row >= 2:
+            try:
+                v = signup_link.preview(id, row, acct)
+            except signup_link.LinkError as ex:
+                if ex.code in LINK_TO_DASHBOARD:
+                    raise
+                return RedirectResponse(_link_url(id, err=ex.code), status_code=303)
+            return _headers(HTMLResponse(render_link_confirm(v, csrf_for(s), msg)))
+        return _headers(HTMLResponse(render_link_picker(signup_link.picker(id), msg)))
+    except signup_link.LinkError as ex:
+        return RedirectResponse(f"/dashboard?msg=link_{ex.code}#unmatched", status_code=303)
+    except Exception as ex:
+        log.warning("signup link page failed: %s", type(ex).__name__)
+        return RedirectResponse("/dashboard?msg=err", status_code=303)
+
+
+@router.post("/dashboard/signup/link")
+async def signup_link_post(request: Request):
+    import signup_link
+    form, _, bad = await _edit_post(request)
+    if bad:
+        return bad
+    try:
+        sid = int(str(form.get("id") or "0"))
+        row = int(str(form.get("row") or "0"))
+    except ValueError:
+        sid = row = 0
+    if sid < 1 or row < 2:
+        return Response("Bad request", status_code=400)
+    acct = str(form.get("acct") or "")
+    try:
+        signup_link.link(sid, row, acct, form.get("confirm"))
+    except signup_link.LinkError as ex:
+        if ex.code in LINK_TO_DASHBOARD:
+            return RedirectResponse(f"/dashboard?msg=link_{ex.code}#unmatched", status_code=303)
+        if ex.code == "moved":
+            return RedirectResponse(_link_url(sid, err=ex.code), status_code=303)
+        return RedirectResponse(_link_url(sid, row, acct, ex.code), status_code=303)
+    except Exception as ex:
+        log.warning("signup link failed: %s", type(ex).__name__)
+        return RedirectResponse("/dashboard?msg=err", status_code=303)
+    return RedirectResponse(f"/dashboard?msg=linked&row={row}", status_code=303)
