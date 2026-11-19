@@ -368,6 +368,10 @@ def write_edit(row: int, acct: str, phone: str, address: str, city: str):
     data = fetch_rows(force=True)
     d = _verify_row(data, row, acct)
     header = data["header"]
+    # Consent is per number: a new phone on an opted-in customer needs the consent tick in the full Edit.
+    opted = str(d.get("Opt-In Status", "")).strip().lower() == "opted in"
+    if p and opted and p != customer_edit.norm(PHONE_COL, d.get(PHONE_COL)):
+        raise ValueError("opted-in phone")
     new = {PHONE_COL: p, "Address": " ".join(address.split())[:200], "City": " ".join(city.split())[:80]}
     new = {k: v for k, v in new.items() if k in header}
     old_state = edit_state(d)
@@ -1221,12 +1225,19 @@ def _main_page(request, s, msg="", test=0, row=0, add_prefill=None, add_err="", 
              "noundo": "Nothing to undo for that customer.",
              "edited": "Saved. Phone/address updated (this does not opt anyone in to texts).",
              "nochange": "Nothing changed.",
+             "optinphone": ("That customer is opted in to texts, so a new phone number needs their consent. "
+                            "Nothing was saved. Use Edit on their card and tick \"Customer agreed to get texts "
+                            "at this number\"."),
              "badphone": "That phone number doesn't look right. Use a 10-digit US number, like (504) 555-0123.",
              "err": "That didn't save. Refresh and try again."}.get(msg, "")
     edit = None
     if customer_edit.enabled():
         edit = {"rows": data["rows"], "prefill": add_prefill, "err": add_err}
         flash = EDIT_FLASH.get(msg) or customer_edit.ERRORS.get(msg) or flash
+    if msg in ("edited", "added", "saved", "consent") and row and flash:
+        note = customer_edit.shared_phone_note(data["rows"], row)
+        if note:
+            flash = f"{flash} {note}"
     fu = None
     if msg in ("serviced", "cancelled", "reactivated", "edited", "added", "saved", "consent") and row:
         fu = next((v for v in views if v["row"] == row and v["undoable"]), None)
@@ -1408,6 +1419,8 @@ def edit(request: Request, row: int = Form(...), acct: str = Form(...), phone: s
         except ValueError as ex:
             if str(ex) == "bad phone":
                 return "/dashboard?msg=badphone"
+            if str(ex) == "opted-in phone":
+                return f"/dashboard?msg=optinphone&row={row}"
             raise
         log.info("dashboard: row %s (%s) edit -> %s", row, acct, r)
         return f"/dashboard?msg=edited&row={row}" if r == "saved" else "/dashboard?msg=nochange"

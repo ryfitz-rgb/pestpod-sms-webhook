@@ -304,3 +304,54 @@ def test_no_texts_sent(be, monkeypatch):
     ce.add_customer({"acct": "2004", "name": "Quiet", "phone": "5045550188", "optin_status": "Opted in",
                      "optin_method": "Verbal", "consent": "yes"}, TODAY)
     ce.save_edit(2, "1001", {"city": "Kenner"}, TODAY)
+
+
+# ---------------------------------------------------------------- follow-ups (Nov 19)
+def test_old_edit_refuses_new_phone_for_opted_in(be):
+    with pytest.raises(ValueError) as ex:
+        dash.write_edit(3, "1002", "5045550999", "", "Metairie")
+    assert str(ex.value) == "opted-in phone"
+    assert cell(be, 3, "Phone (+1XXXXXXXXXX)") == "+15045550102" and undo_rows(be) == []
+    # same number typed differently, clearing the phone, or address/city only: all fine
+    assert dash.write_edit(3, "1002", "(504) 555-0102", "5 Oak St", "Metairie") == "saved"
+    assert dash.write_edit(3, "1002", "", "5 Oak St", "Metairie") == "saved"
+    # not opted in: phone changes are allowed as before
+    assert dash.write_edit(2, "1001", "5045550998", "", "Metairie") == "saved"
+
+
+def test_old_edit_route_message(be):
+    c = TestClient(main.app)
+    csrf = _login(c)
+    r = c.post("/dashboard/edit", data={"row": 3, "acct": "1002", "phone": "5045550999", "address": "",
+                                        "city": "Metairie", "csrf": csrf}, follow_redirects=False)
+    assert r.headers["location"] == "/dashboard?msg=optinphone&row=3"
+    assert "needs their consent" in c.get(r.headers["location"]).text
+    c.cookies.clear()
+
+
+def test_shared_phone_heads_up(be):
+    row, _ = ce.add_customer({"acct": "2010", "name": "Same Phone", "phone": "504-555-0102"}, TODAY)
+    rows = dash.fetch_rows(force=True)["rows"]
+    note = ce.shared_phone_note(rows, row)
+    assert "ending 0102" in note and "Acct 1002 · Bob Opted" in note and "(Acct 1002)" in note
+    assert "5550102" not in note and "+1504" not in note  # last 4 only
+    assert ce.shared_phone_note(rows, 2) == ""  # Alice's phone is hers alone
+    # cancelled / hidden customers don't count
+    be.tabs["Customers"]["rows"][3][COL["Status"]] = "Cancelled"
+    assert ce.shared_phone_note(dash.fetch_rows(force=True)["rows"], row) == ""
+
+
+def test_shared_phone_flash_does_not_block(be):
+    c = TestClient(main.app)
+    csrf = _login(c)
+    r = c.post("/dashboard/customer/add", data={"acct": "2011", "name": "Twin Phone", "phone": "5045550101",
+                                                "csrf": csrf}, follow_redirects=False)
+    assert r.headers["location"] == "/dashboard?msg=added&row=6"
+    assert cell(be, 6, "Customer Name") == "Twin Phone"
+    page = c.get(r.headers["location"]).text
+    assert "Heads-up: the phone ending 0101 is also on Acct 1001" in page
+    r = c.post("/dashboard/customer/edit", data={"row": 5, "acct": "1004", "phone": "5045550101", "csrf": csrf},
+               follow_redirects=False)
+    assert r.headers["location"] == "/dashboard?msg=saved&row=5"
+    assert "ending 0101 is also on" in c.get(r.headers["location"]).text
+    c.cookies.clear()

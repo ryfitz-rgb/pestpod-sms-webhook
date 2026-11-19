@@ -357,6 +357,35 @@ def add_customer(form, today: date | None = None):
     return row, ("consent" if action == "optin" else "added")
 
 
+# ---------------------------------------------------------------- shared phone heads-up
+def _last10(v) -> str:
+    return re.sub(r"\D", "", norm(PHONE_COL, v))[-10:]
+
+
+def shared_phone_note(rows, row: int) -> str:
+    """Non-blocking heads-up when this row's phone is also on another active customer.
+    Only the last 4 digits are ever shown. '' when there's nothing to say."""
+    d = _dash()
+    me = next((r for r in rows if r.get("_row") == row), None)
+    key = _last10(d._get(me, PHONE_COL, "Phone")) if me else ""
+    if len(key) != 10:
+        return ""
+    others, first = [], None
+    for r in rows:
+        if _last10(d._get(r, PHONE_COL, "Phone")) != key:
+            continue
+        if first is None:
+            first = r  # the webhook matches replies to the first row with that phone
+        if r.get("_row") != row and not d.is_hidden_row(r) and not d.is_cancelled(r):
+            others.append(f"Acct {norm(ACCOUNT_COL, r.get(ACCOUNT_COL)) or '?'} · {d._get(r, NAME_COL, 'Name')}")
+    if not others:
+        return ""
+    who = "; ".join(others[:3]) + (f" and {len(others) - 3} more" if len(others) > 3 else "")
+    first_acct = norm(ACCOUNT_COL, first.get(ACCOUNT_COL)) or "?"
+    return (f"Heads-up: the phone ending {key[-4:]} is also on {who}. Both are saved. Texts from that number "
+            f"get matched to the first one on the list (Acct {first_acct}).")
+
+
 # ---------------------------------------------------------------- undo support
 JSON_ACTIONS = ("edit", "optin", "add")
 
