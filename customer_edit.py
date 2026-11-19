@@ -387,7 +387,7 @@ def shared_phone_note(rows, row: int) -> str:
 
 
 # ---------------------------------------------------------------- undo support
-JSON_ACTIONS = ("edit", "optin", "add")
+JSON_ACTIONS = ("edit", "optin", "add", "link")  # "link": signup_link.py
 
 
 def state_matches(d_row: dict, new_json: str) -> bool:

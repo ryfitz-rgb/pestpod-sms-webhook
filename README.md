@@ -171,6 +171,23 @@ as before (the older phone/address/city Edit keeps working either way).
   Opted in (consent is per number) and points to the full Edit's consent box. Clearing the phone is still allowed.
 - Same session login + CSRF token + origin check as every other dashboard form. Never sends a text.
 
+### Link a sign-up to a customer (`signup_link.py`, off unless `DASHBOARD_EDIT_ENABLED`)
+While editing is on, each unmatched sign-up that ticked the consent box gets a **Link to customer** button.
+1. `GET /dashboard/signup/link?id=<signup id>`: pick the customer (search by name, account or city; likely
+   matches first; test/example rows aren't listed). Phones show as last 4 only.
+2. `GET /dashboard/signup/link?id=..&row=..&acct=..`: confirm page with the sign-up (name, last 4, time, page),
+   the customer (name, account, current phone last 4, Opt-In status), what will be written, and warnings
+   (different phone gets replaced, already opted in on another number, cancelled, phone also on another customer).
+   Opted out / STOP customers (or a STOP in the texts for either number) are refused: no Confirm button.
+3. `POST /dashboard/signup/link` (needs `confirm=yes`, session + CSRF + origin check like every other form):
+   the server reads the sign-up's FULL phone from `optin_signups` and writes Phone, Opt-In Status `Opted in`,
+   Opt-In Method `Web form`, Opt-In Date = the day they signed up (CT). One Undo Log row (action `link`), so
+   Undo on the card puts the old values back. The sign-up leaves the unmatched list because its phone is now on a
+   marked row; the link is also noted in the `optin_links` table (signup id, account, row; no phone).
+- Refused: no consent (contact only), not on the unmatched list any more (already linked/matched), opted out/STOP.
+- Never sends a text. The full number is never sent to the browser by these pages; it only shows up afterwards
+  where every customer's number already lives (that customer's Edit form).
+
 ### Unmatched sign-ups (`unmatched.py`, read-only)
 Section + red badge on `/dashboard` listing web opt-ins (`optin_signups`) that need a hand fix:
 **no phone match** on the Customers tab, **matched but not marked** (Opt-In Status/Method/Date, L/M/N, not
