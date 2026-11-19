@@ -1,7 +1,8 @@
 # Plan: pestpod-db becomes the main customer list
 
-Status: **prep only.** Nothing is live. `CUSTOMER_STORE` is unset, which means `sheet`,
-and with that setting the app behaves exactly as it does today.
+Status: the webhook and dashboard use `CUSTOMER_STORE=postgres` as of 18 Nov 2026
+(America/Chicago). The Google Sheet is no longer the main copy. Rollback is still
+`CUSTOMER_STORE=sheet` (about a minute). This doc tracks the leftover steps.
 
 ## How it works
 - `gridstore.py` answers the same small set of Google Sheets calls the app already makes, but from
@@ -27,8 +28,19 @@ python -m gridstore export --out /tmp/grid.json # raw dump for rollback
 ## Cutover sequence (each step needs its own OK)
 1. Merge this prep PR. No behavior change except the K write guard.
 2. Run `import`, then `verify`. Repeat `import --replace` + `verify` daily for about a week. The goal is MATCH.
-3. Move batch to a path that can reach the database (see the report options), with
-   PESTPOD_BATCH_ENABLED still off.
+3. Move batch to a path that can reach the database, with `PESTPOD_BATCH_ENABLED`
+   still off. **Done in the `batch-postgres` branch (not live until Ryan merges
+   and sets the token below).** GitHub Actions runners cannot connect to
+   pestpod-db: the allowlist is empty and must stay that way. Passing
+   `DATABASE_URL` to the workflow would not work, and would also put a database
+   secret outside Render. A new Render cron job would also work (it can use the
+   internal `DATABASE_URL`) but it costs a $1/month minimum and would replace
+   the Actions dry-run UI. This branch keeps Actions as the trigger and has it
+   POST to `POST /api/v1/batch` on the existing web service, which already has
+   `DATABASE_URL` and `CUSTOMER_STORE=postgres` and runs `batch.py` there.
+   Extra cost: $0. Ryan must set `BATCH_RUN_TOKEN` on the Render web service and
+   as a GitHub Actions secret (same value), then do one manual dry-run before
+   ever flipping `PESTPOD_BATCH_ENABLED`. Do not change the allowlist.
 4. Dashboard extras: add customer, edit more fields.
 5. Cutover, in the evening: freeze sheet edits, run a final `import --replace`, get `verify` = MATCH,
    then set `CUSTOMER_STORE=postgres` on the webhook. Smoke test: /health, /dashboard, `batch.py --dry-run`.
