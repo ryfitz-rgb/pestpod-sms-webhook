@@ -164,6 +164,11 @@ as before (the older phone/address/city Edit keeps working either way).
 - **Undo Log**: every add/edit appends a row first (action `add`, `edit` or `optin`; old/new values as JSON of the
   changed columns in Old Status / New Status). The card's Undo button puts the old values back while nothing
   has changed since. Undoing an add blanks that row (it drops off the list; nothing is deleted).
+- **Shared phone heads-up**: after an add/edit, if that phone (last 10 digits) is also on another active customer,
+  the green message says so (last 4 only, plus the other account and name). It never blocks the save. Replies from
+  that number match the first row on the list, so the note says which one.
+- The older phone/address/city Edit (`POST /dashboard/edit`) now refuses a new phone for a customer who is
+  Opted in (consent is per number) and points to the full Edit's consent box. Clearing the phone is still allowed.
 - Same session login + CSRF token + origin check as every other dashboard form. Never sends a text.
 
 ### Unmatched sign-ups (`unmatched.py`, read-only)

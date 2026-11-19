@@ -194,8 +194,12 @@ def test_dashboard_cancel_push_edit(grid):
     assert cell(grid, "Customers", 3, "Y") == S(date(2026, 11, 10))
     dash.write_push(2, "1001", date(2026, 11, 10))
     assert cell(grid, "Customers", 2, "U") == "2026-12"
-    assert dash.write_edit(2, "1001", "(555) 555-0111", "1 Test St", "Testville") == "saved"
-    assert cell(grid, "Customers", 2, "C") == "+15555550111"
+    with pytest.raises(ValueError, match="opted-in phone"):   # Alice is opted in: new phone needs consent
+        dash.write_edit(2, "1001", "(555) 555-0111", "1 Test St", "Testville")
+    assert dash.write_edit(2, "1001", "(555) 555-0101", "1 Test St", "Testville") == "saved"
+    assert cell(grid, "Customers", 2, "C") == "+15555550101" and cell(grid, "Customers", 2, "D") == "1 Test St"
+    assert dash.write_edit(3, "1002", "(555) 555-0111", "", "") == "saved"  # not opted in
+    assert cell(grid, "Customers", 3, "C") == "+15555550111"
     with pytest.raises(ValueError):
         dash.write_last_service(2, "WRONG", date(2026, 11, 9))   # row/account check still applies
 
