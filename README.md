@@ -106,8 +106,29 @@ GitHub Actions (`.github/workflows/batch-reminders.yml`) daily at 15:30 and 18:3
 Scheduled runs only fire when the repo variable `PESTPOD_BATCH_ENABLED` = `true`. Manual runs:
 Actions -> PestPod batch reminders -> Run workflow (dry run is the default).
 
-Repo secrets: `GOOGLE_SA_JSON_B64`, `TWILIO_ACCOUNT_SID`, and either `TWILIO_API_KEY_SID` +
-`TWILIO_API_KEY_SECRET` or `TWILIO_AUTH_TOKEN`.
+The workflow does not talk to Postgres or the Google Sheet from the GitHub runner.
+`pestpod-db`'s outside-access allowlist is empty and stays that way, so runners cannot
+open a database connection. Instead Actions POSTs to `POST /api/v1/batch` on the Render
+web service (`pestpod-sms-webhook`), which already has `DATABASE_URL`,
+`CUSTOMER_STORE=postgres`, and the Twilio credentials, and runs `batch.py` there.
+You can still run `python batch.py --dry-run` in a Render Shell the same way.
+
+**Ryan needs to set (once), after or just before merging this branch. Cost: $0.
+Do not flip `PESTPOD_BATCH_ENABLED`. Do not change the allowlist. Do not put
+`DATABASE_URL` in GitHub.**
+
+1. Create a long random token (for example `openssl rand -hex 32`).
+2. Add `BATCH_RUN_TOKEN` with that value as a **secret** on the Render web service
+   `pestpod-sms-webhook` (Environment). The webhook will redeploy; `/version` then
+   shows `"batch_run": true` (the token itself is never shown).
+3. Add the **same** value as the GitHub Actions secret `BATCH_RUN_TOKEN` on this repo.
+4. Optional: repo variable `BATCH_RUN_URL` if the webhook is not at
+   `https://pestpod-sms-webhook.onrender.com` (no trailing slash, origin only).
+
+Until those are set, a manual Actions run exits 1 with a short setup message, and
+the endpoint returns 503. Then do one manual dry-run (the default) to confirm it
+reads Postgres. Live scheduled sends stay off until `PESTPOD_BATCH_ENABLED` is
+`true`.
 
 Note: GitHub disables scheduled workflows in public repos after 60 days with no commits.
 

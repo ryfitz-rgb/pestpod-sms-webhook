@@ -3,6 +3,12 @@ name: PestPod batch reminders
 # Daily due nudge: batch.py texts customers whose Next Due falls in the current month, from the 1st (once per due cycle).
 # GitHub cron is UTC and has no DST: 15:30 UTC = 10:30 AM CDT / 9:30 AM CST,
 # 18:30 UTC = 1:30 PM CDT / 12:30 PM CST (idempotent retry in case the first run was late or failed).
+#
+# The job does not talk to Postgres or the Google Sheet from the runner. pestpod-db's
+# allowlist is empty and stays that way, so GitHub runners cannot open a database
+# connection. Instead this workflow POSTs to POST /api/v1/batch on the Render web
+# service, which already has DATABASE_URL and CUSTOMER_STORE=postgres, and runs
+# batch.py there. Do not add DATABASE_URL to GitHub secrets.
 on:
   schedule:
     - cron: "30 15 * * *"
@@ -10,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (plan only, no texts, no sheet writes)"
+        description: "Dry run (plan only, no texts, no customer-store writes)"
         type: boolean
         default: true
       now:
@@ -40,28 +46,52 @@ jobs:
     # Scheduled sends stay off until the repo variable PESTPOD_BATCH_ENABLED is "true".
     if: github.event_name == 'workflow_dispatch' || vars.PESTPOD_BATCH_ENABLED == 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Run batch
+      - name: Run batch on Render
         env:
-          GOOGLE_SA_JSON_B64: ${{ secrets.GOOGLE_SA_JSON_B64 }}
-          SHEET_ID: ${{ vars.SHEET_ID }}
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_API_KEY_SID: ${{ secrets.TWILIO_API_KEY_SID }}
-          TWILIO_API_KEY_SECRET: ${{ secrets.TWILIO_API_KEY_SECRET }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          BATCH_RUN_URL: ${{ vars.BATCH_RUN_URL }}
+          BATCH_RUN_TOKEN: ${{ secrets.BATCH_RUN_TOKEN }}
           IN_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
           IN_NOW: ${{ inputs.now }}
           IN_ONLY_PHONE: ${{ inputs.only_phone }}
           IN_FORCE_WAVE: ${{ inputs.force_wave }}
         run: |
-          args=()
-          [ "$IN_DRY_RUN" = "true" ] && args+=(--dry-run)
-          [ -n "$IN_NOW" ] && args+=(--now "$IN_NOW")
-          [ -n "$IN_ONLY_PHONE" ] && args+=(--only-phone "$IN_ONLY_PHONE")
-          [ -n "$IN_FORCE_WAVE" ] && args+=(--force-wave "$IN_FORCE_WAVE")
-          python batch.py "${args[@]}"
+          set -euo pipefail
+          if [ -z "${BATCH_RUN_TOKEN:-}" ]; then
+            echo "Missing GitHub secret BATCH_RUN_TOKEN."
+            echo "Set the same value as BATCH_RUN_TOKEN on the Render web service."
+            echo "Do not add DATABASE_URL to GitHub, and do not change the Postgres allowlist."
+            exit 1
+          fi
+          base="${BATCH_RUN_URL:-https://pestpod-sms-webhook.onrender.com}"
+          base="${base%/}"
+          payload="$(python3 -c '
+          import json, os
+          force = os.environ.get("IN_FORCE_WAVE") or ""
+          body = {"dry_run": os.environ.get("IN_DRY_RUN") == "true"}
+          if os.environ.get("IN_NOW"):
+              body["now"] = os.environ["IN_NOW"]
+          if os.environ.get("IN_ONLY_PHONE"):
+              body["only_phone"] = os.environ["IN_ONLY_PHONE"]
+          if force:
+              body["force_wave"] = int(force)
+          print(json.dumps(body))
+          ')"
+          echo "POST ${base}/api/v1/batch  dry_run=${IN_DRY_RUN}"
+          # --fail-with-body: non-2xx prints the response (phones already last-4) and exits 1.
+          # Token is a secret (masked in logs). Do not add -v (it would print the header).
+          curl -sS --fail-with-body --max-time 1800 \
+            -X POST "${base}/api/v1/batch" \
+            -H "Authorization: Bearer ${BATCH_RUN_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            | python3 -c 'import json,sys; raw=sys.stdin.read();
+          try:
+              j=json.loads(raw)
+          except json.JSONDecodeError:
+              print(raw); sys.exit(1)
+          log=j.pop("log", [])
+          print(json.dumps(j, indent=2))
+          print("--- log ---")
+          print("\n".join(log) if isinstance(log, list) else str(log))
+          if j.get("ok") is False:
+              sys.exit(1)'

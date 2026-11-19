@@ -18,6 +18,10 @@ Env vars:
                       free-text message (with a link to that conversation). Off if unset. Requires ALERT_EMAIL, ALERT_EMAIL_FROM, RESEND_API_KEY.
   REPLY_BOX_ENABLED   optional. true/1/yes turns on the dashboard texts view + reply box
                       (see conversations.py). Off if unset.
+  BATCH_RUN_TOKEN     optional. Shared secret for POST /api/v1/batch, which GitHub Actions
+                      uses to run batch.py inside this service (so the batch can reach
+                      Postgres without opening the database allowlist). Unset = endpoint
+                      disabled (503). Never log the token.
 """
 import base64
 import json
@@ -791,7 +795,8 @@ async def health():
 async def version():
     # Render sets RENDER_GIT_COMMIT on each deploy.
     return {"commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
-            "signature_validation": bool(_auth_token())}
+            "signature_validation": bool(_auth_token()),
+            "batch_run": bool(os.environ.get("BATCH_RUN_TOKEN", "").strip())}
 
 
 @app.get("/api/v1/db/status")
@@ -873,6 +878,8 @@ import conversations  # noqa: E402
 
 app.include_router(dashboard.router)
 app.include_router(conversations.router)  # reply box; 404s unless REPLY_BOX_ENABLED
+import batch_api  # noqa: E402
+app.include_router(batch_api.router)
 
 
 if __name__ == "__main__":

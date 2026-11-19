@@ -18,11 +18,18 @@ Usage:
   python batch.py --only-phone +1504... --force-wave 1   # live single test send
 
 Env vars:
-  GOOGLE_SA_JSON_B64   service account key (same as the webhook)
-  SHEET_ID             required; the Google Sheet id (exits with an error if unset)
+  CUSTOMER_STORE       "postgres" (production) or "sheet" (rollback). batch.py uses
+                       main.get_sheets(), same as the webhook and dashboard.
+  DATABASE_URL         required when CUSTOMER_STORE=postgres (Render internal URL).
+  GOOGLE_SA_JSON_B64   service account key (needed only when CUSTOMER_STORE=sheet)
+  SHEET_ID             required by the CLI; the Google Sheet id
   TWILIO_ACCOUNT_SID   plus TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET, or TWILIO_AUTH_TOKEN
   TWILIO_MESSAGING_SERVICE_SID  optional; defaults to the PestPod Appointment Alerts service
   BATCH_MAX_SENDS      optional safety cap per run (default 200)
+
+Scheduled and Actions runs go through POST /api/v1/batch on the Render web service
+(see .github/workflows/batch-reminders.yml). Do not pass DATABASE_URL to GitHub:
+the Postgres allowlist is empty and stays that way.
 """
 import argparse
 import logging
@@ -371,7 +378,7 @@ def run(now=None, dry_run=True, force_wave=None, only_phone=None, include_exampl
 
     svc = svc or main.get_sheets()
     if svc is None:
-        raise SystemExit("Sheets unavailable (GOOGLE_SA_JSON_B64 missing/invalid)")
+        raise SystemExit("Customer store unavailable (DATABASE_URL or GOOGLE_SA_JSON_B64)")
     cols, customers = parse_customers(read_tab(svc, CUSTOMERS_TAB))
     try:
         outbound = parse_outbound(read_tab(svc, OUTBOUND_TAB)) if OUTBOUND_TAB in tab_titles(svc) else []
